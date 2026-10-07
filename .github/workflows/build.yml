@@ -1,0 +1,25 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - run: ./gradlew assembleDebug --no-daemon
+      - name: Publish APK to "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          cp "$APK" Mp3.apk
+          gh release upload latest Mp3.apk --clobber \
+            || gh release create latest Mp3.apk --title "Mp3 (ultima build)" --notes "APK compilato automaticamente dall'ultimo commit su main."
