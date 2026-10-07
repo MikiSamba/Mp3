@@ -3,6 +3,10 @@ package com.example.mp3
 import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.os.Build
+import android.util.Size
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.compose.runtime.getValue
@@ -39,8 +43,19 @@ fun ContentResolver.loadSongs(): List<Song> {
     return out
 }
 
+fun ContentResolver.albumArt(song: Song): Bitmap? = runCatching {
+    if (Build.VERSION.SDK_INT >= 29) loadThumbnail(song.uri, Size(512, 512), null)
+    else openInputStream(ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), song.albumId))
+        ?.use { BitmapFactory.decodeStream(it) }
+}.getOrNull()
+
 /** Impostazioni + modifiche ai brani, salvate in SharedPreferences ed esposte come stato Compose. */
-class Prefs(ctx: Context) {
+class Prefs private constructor(ctx: Context) {
+    companion object {
+        @Volatile private var instance: Prefs? = null
+        fun of(ctx: Context) = instance ?: Prefs(ctx.applicationContext).also { instance = it }
+    }
+
     private val sp = ctx.getSharedPreferences("prefs", Context.MODE_PRIVATE)
     private val edits = ctx.getSharedPreferences("edits", Context.MODE_PRIVATE)
 

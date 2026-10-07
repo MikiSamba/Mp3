@@ -10,6 +10,9 @@ import androidx.compose.runtime.setValue
 class Player(private val ctx: Context, private val prefs: Prefs) {
     private val mp = MediaPlayer().apply { setOnCompletionListener { next(auto = true) } }
 
+    /** Chiamato a ogni cambio di stato: il servizio aggiorna MediaSession e notifica. */
+    var onChange: () -> Unit = {}
+
     var queue: List<Song> by mutableStateOf(emptyList()); private set
     var current: Song? by mutableStateOf(null); private set
     var playing by mutableStateOf(false); private set
@@ -21,6 +24,7 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         if (current == null) return
         if (mp.isPlaying) mp.pause() else mp.start()
         playing = mp.isPlaying
+        onChange()
     }
 
     fun next(auto: Boolean = false) {
@@ -30,7 +34,7 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
             prefs.shuffle && queue.size > 1 -> start(queue.filterIndexed { j, _ -> j != i }.random())
             i + 1 < queue.size -> start(queue[i + 1])
             prefs.repeat || !auto -> start(queue[0])
-            else -> playing = false
+            else -> { playing = false; onChange() }
         }
     }
 
@@ -40,7 +44,14 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         if (mp.currentPosition > 3000) mp.seekTo(0) else start(queue[(i - 1).mod(queue.size)])
     }
 
-    fun seekTo(ms: Int) { if (current != null) mp.seekTo(ms) }
+    fun seekTo(ms: Int) { if (current != null) { mp.seekTo(ms); onChange() } }
+
+    fun stop() {
+        mp.reset()
+        current = null
+        playing = false
+        onChange()
+    }
 
     /** Dopo una modifica ai metadati, aggiorna coda e brano corrente con le nuove versioni. */
     fun refresh(all: List<Song>) {
@@ -58,5 +69,6 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         playing = runCatching { mp.reset(); mp.setDataSource(ctx, song.uri); mp.prepare(); mp.start() }
             .onFailure { Toast.makeText(ctx, "Impossibile riprodurre: ${song.title}", Toast.LENGTH_SHORT).show() }
             .isSuccess
+        onChange()
     }
 }
