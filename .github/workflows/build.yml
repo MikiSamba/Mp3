@@ -19,7 +19,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          cp "$APK" Mp3.apk
-          gh release upload latest Mp3.apk --clobber \
-            || gh release create latest Mp3.apk --title "Mp3 (ultima build)" --notes "APK compilato automaticamente dall'ultimo commit su main."
+          cp app/build/outputs/apk/debug/app-debug.apk Mp3.apk
+          for i in 1 2 3; do
+            gh release delete-asset latest Mp3.apk -y 2>/dev/null || true
+            gh release upload latest Mp3.apk && exit 0
+            gh release create latest Mp3.apk --title "Mp3 (ultima build)" --notes "APK compilato automaticamente dall'ultimo commit su main." && exit 0
+            echo "tentativo $i fallito, riprovo tra 15s"; sleep 15
+          done
+          exit 1
