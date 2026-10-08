@@ -43,10 +43,22 @@ class PlaybackService : Service() {
             })
             isActive = true
         }
+        session.setSessionActivity(openApp())
         if (Build.VERSION.SDK_INT >= 26) {
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Riproduzione", NotificationManager.IMPORTANCE_LOW))
+            nm.deleteNotificationChannel("playback") // canale 1.2 a bassa priorità: alcuni OEM non lo mostrano su lock screen/isola
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Riproduzione", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            })
         }
     }
+
+    private fun openApp() = PendingIntent.getActivity(
+        this, 0, Intent(this, MainActivity::class.java).putExtra(EXTRA_NOW_PLAYING, true),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder()
 
@@ -119,20 +131,19 @@ class PlaybackService : Service() {
         )
         fun action(icon: Int, title: String, act: String) =
             Notification.Action.Builder(Icon.createWithResource(this, icon), title, pending(act)).build()
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java).putExtra(EXTRA_NOW_PLAYING, true),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
         @Suppress("DEPRECATION")
         val b = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
         return b.setSmallIcon(R.drawable.ic_note)
             .setContentTitle(song.title).setContentText(song.artist).setSubText(song.album)
             .setLargeIcon(art)
-            .setContentIntent(open)
+            .setContentIntent(openApp())
             .setDeleteIntent(pending(ACTION_STOP))
             .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setCategory(Notification.CATEGORY_TRANSPORT)
             .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setOngoing(player.playing)
+            .apply { if (art != null) { setColor(art.averageColor()); setColorized(true) } }
             .addAction(action(android.R.drawable.ic_media_previous, "Precedente", ACTION_PREV))
             .addAction(
                 if (player.playing) action(android.R.drawable.ic_media_pause, "Pausa", ACTION_TOGGLE)
@@ -144,7 +155,7 @@ class PlaybackService : Service() {
     }
 
     private companion object {
-        const val CHANNEL = "playback"
+        const val CHANNEL = "media"
         const val NOTIF_ID = 1
         const val ACTION_TOGGLE = "com.example.mp3.TOGGLE"
         const val ACTION_NEXT = "com.example.mp3.NEXT"

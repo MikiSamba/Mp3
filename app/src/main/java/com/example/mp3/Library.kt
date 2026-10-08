@@ -49,6 +49,9 @@ fun ContentResolver.albumArt(song: Song): Bitmap? = runCatching {
         ?.use { BitmapFactory.decodeStream(it) }
 }.getOrNull()
 
+/** Colore medio della copertina, per sfondi e notifica. */
+fun Bitmap.averageColor(): Int = Bitmap.createScaledBitmap(this, 1, 1, true).getPixel(0, 0)
+
 /** Impostazioni + modifiche ai brani, salvate in SharedPreferences ed esposte come stato Compose. */
 class Prefs private constructor(ctx: Context) {
     companion object {
@@ -58,6 +61,7 @@ class Prefs private constructor(ctx: Context) {
 
     private val sp = ctx.getSharedPreferences("prefs", Context.MODE_PRIVATE)
     private val edits = ctx.getSharedPreferences("edits", Context.MODE_PRIVATE)
+    private val lyrics = ctx.getSharedPreferences("lyrics", Context.MODE_PRIVATE)
 
     var theme by pref("theme", "system")       // system | light | dark
     var dynamic by pref("dynamic", false)      // Material You (Android 12+)
@@ -84,6 +88,9 @@ class Prefs private constructor(ctx: Context) {
         }.apply()
         editsVersion++
     }
+
+    fun lyrics(id: Long): String? = lyrics.getString(id.toString(), null)
+    fun saveLyrics(id: Long, text: String) = lyrics.edit().putString(id.toString(), text).apply()
 
     @Suppress("UNCHECKED_CAST")
     private fun <T : Any> pref(key: String, def: T) = object : ReadWriteProperty<Any?, T> {

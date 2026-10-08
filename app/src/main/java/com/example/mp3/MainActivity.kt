@@ -3,15 +3,18 @@
 package com.example.mp3
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -27,6 +30,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -36,7 +40,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,15 +62,20 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -71,6 +85,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -87,6 +102,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -94,10 +111,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -150,8 +169,8 @@ private fun Themed(prefs: Prefs, content: @Composable () -> Unit) {
     val accent = ACCENTS[prefs.accent] ?: ACCENTS.values.first()
     val scheme = when {
         prefs.dynamic && Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-        dark -> darkColorScheme(primary = accent, primaryContainer = accent.copy(alpha = 0.3f))
-        else -> lightColorScheme(primary = accent, primaryContainer = accent.copy(alpha = 0.15f))
+        dark -> darkColorScheme(primary = accent, secondary = accent, primaryContainer = accent.copy(alpha = 0.3f), secondaryContainer = accent.copy(alpha = 0.2f))
+        else -> lightColorScheme(primary = accent, secondary = accent, primaryContainer = accent.copy(alpha = 0.15f), secondaryContainer = accent.copy(alpha = 0.12f))
     }
     MaterialTheme(colorScheme = scheme, content = content)
 }
@@ -205,7 +224,7 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
                 title = {
                     val q = query
                     if (q != null) TextField(q, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Cerca…") }, singleLine = true)
-                    else Text(group ?: if (tab == 0) "Musica" else TABS[tab])
+                    else Text(group ?: if (tab == 0) "Musica" else TABS[tab], fontWeight = FontWeight.Bold)
                 },
                 navigationIcon = { if (group != null) IconButton({ group = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro") } },
                 actions = {
@@ -235,7 +254,8 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
                     SongList(if (tab == 1) inGroup.sortedBy { it.track } else inGroup, player, prefs) { editing = it }
                 }
                 tab == 0 -> SongList(shown, player, prefs) { editing = it }
-                else -> GroupList(if (tab == 1) shown.groupBy { it.album } else shown.groupBy { it.artist }, isAlbum = tab == 1) { group = it }
+                tab == 1 -> AlbumGrid(shown.groupBy { it.album }) { group = it }
+                else -> ArtistList(shown.groupBy { it.artist }) { group = it }
             }
         }
     }
@@ -248,21 +268,23 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
 @Composable
 private fun SongList(songs: List<Song>, player: Player, prefs: Prefs, onEdit: (Song) -> Unit) {
     if (songs.isEmpty()) return Center("Nessun brano")
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 8.dp)) {
         items(songs, key = { it.id }) { s ->
             val isCurrent = s.id == player.current?.id
             ListItem(
                 headlineContent = {
-                    Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified)
+                    Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (isCurrent) FontWeight.Bold else null,
+                         color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified)
                 },
                 supportingContent = { Text("${s.artist} · ${s.album}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                leadingContent = { AlbumArt(s, Modifier.size(48.dp)) },
+                leadingContent = { AlbumArt(s, Modifier.size(52.dp), radius = 10.dp) },
                 trailingContent = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (prefs.showDuration) Text(fmt(s.duration), style = MaterialTheme.typography.bodySmall)
                         IconButton({ onEdit(s) }) { Icon(Icons.Default.Edit, "Modifica") }
                     }
                 },
+                colors = ListItemDefaults.colors(containerColor = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent),
                 modifier = Modifier.clickable { player.play(songs, s) },
             )
         }
@@ -270,17 +292,38 @@ private fun SongList(songs: List<Song>, player: Player, prefs: Prefs, onEdit: (S
 }
 
 @Composable
-private fun GroupList(groups: Map<String, List<Song>>, isAlbum: Boolean, onOpen: (String) -> Unit) {
-    if (groups.isEmpty()) return Center("Nessun elemento")
+private fun AlbumGrid(albums: Map<String, List<Song>>, onOpen: (String) -> Unit) {
+    if (albums.isEmpty()) return Center("Nessun album")
+    LazyVerticalGrid(
+        GridCells.Adaptive(150.dp), Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        items(albums.keys.sortedBy { it.lowercase() }) { name ->
+            val list = albums.getValue(name)
+            Column(Modifier.clip(RoundedCornerShape(14.dp)).clickable { onOpen(name) }) {
+                AlbumArt(list[0], Modifier.fillMaxWidth().aspectRatio(1f), radius = 14.dp)
+                Text(name, Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp), style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${list[0].artist} · ${brani(list.size)}", Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp), style = MaterialTheme.typography.bodySmall,
+                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtistList(artists: Map<String, List<Song>>, onOpen: (String) -> Unit) {
+    if (artists.isEmpty()) return Center("Nessun artista")
     LazyColumn(Modifier.fillMaxSize()) {
-        items(groups.keys.sortedBy { it.lowercase() }) { name ->
-            val list = groups.getValue(name)
+        items(artists.keys.sortedBy { it.lowercase() }) { name ->
+            val list = artists.getValue(name)
             ListItem(
                 headlineContent = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                supportingContent = {
-                    Text(if (isAlbum) "${list[0].artist} · ${brani(list.size)}" else "${list.map { it.album }.distinct().size} album · ${brani(list.size)}")
+                supportingContent = { Text("${list.map { it.album }.distinct().size} album · ${brani(list.size)}") },
+                leadingContent = {
+                    Box(Modifier.size(48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                        Text(name.first().uppercase(), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                    }
                 },
-                leadingContent = { if (isAlbum) AlbumArt(list[0], Modifier.size(48.dp)) else Icon(Icons.Default.Person, null, Modifier.size(48.dp)) },
                 modifier = Modifier.clickable { onOpen(name) },
             )
         }
@@ -289,19 +332,23 @@ private fun GroupList(groups: Map<String, List<Song>>, isAlbum: Boolean, onOpen:
 
 @Composable
 private fun PlayerBar(song: Song, player: Player, onOpen: () -> Unit) {
+    val pos = rememberPosition(song, player)
     Surface(tonalElevation = 3.dp, modifier = Modifier.clickable(onClick = onOpen)) {
-        Column(Modifier.padding(horizontal = 8.dp)) {
-            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                AlbumArt(song, Modifier.size(44.dp))
+        Column {
+            LinearProgressIndicator(
+                progress = { pos / song.duration.toFloat().coerceAtLeast(1f) },
+                modifier = Modifier.fillMaxWidth().height(2.dp), drawStopIndicator = {},
+            )
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                AlbumArt(song, Modifier.size(48.dp), radius = 10.dp)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                     Text(song.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(song.artist, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(song.artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 IconButton(player::prev) { Icon(IcPrev, "Precedente") }
                 FilledIconButton(player::toggle) { Icon(if (player.playing) IcPause else Icons.Default.PlayArrow, "Play/Pausa") }
                 IconButton(player::next) { Icon(IcNext, "Successivo") }
             }
-            SeekBar(song, player)
         }
     }
 }
@@ -309,52 +356,115 @@ private fun PlayerBar(song: Song, player: Player, onOpen: () -> Unit) {
 @Composable
 private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> Unit) {
     BackHandler(onBack = onClose)
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("In riproduzione") },
-                navigationIcon = { IconButton(onClose) { Icon(Icons.Default.KeyboardArrowDown, "Chiudi") } },
-            )
-        },
-    ) { pad ->
-        Column(Modifier.padding(pad).fillMaxSize().padding(horizontal = 24.dp, vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Spacer(Modifier.weight(1f))
-            AlbumArt(song, Modifier.fillMaxWidth().aspectRatio(1f), radius = 20.dp)
-            Spacer(Modifier.weight(1f))
-            Text(song.title, style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(
-                "${song.artist} · ${song.album}", style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(16.dp))
-            SeekBar(song, player, showTime = true)
-            Row(Modifier.fillMaxWidth(), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-                IconToggle(IcShuffle, prefs.shuffle, "Casuale") { prefs.shuffle = it }
-                IconButton(player::prev, Modifier.size(56.dp)) { Icon(IcPrev, "Precedente", Modifier.size(36.dp)) }
-                FilledIconButton(player::toggle, Modifier.size(72.dp)) {
-                    Icon(if (player.playing) IcPause else Icons.Default.PlayArrow, "Play/Pausa", Modifier.size(40.dp))
+    val ctx = LocalContext.current
+    val art by produceState<Bitmap?>(null, song.id) { value = withContext(Dispatchers.IO) { ctx.contentResolver.albumArt(song) } }
+    val primary = MaterialTheme.colorScheme.primary
+    val tint = remember(art) { art?.let { Color(it.averageColor()) } ?: primary }
+    var showLyrics by remember { mutableStateOf(false) }
+
+    Box(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)
+            .background(Brush.verticalGradient(0f to tint.copy(alpha = 0.55f), 0.65f to Color.Transparent))
+    ) {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    title = { Text("In riproduzione") },
+                    navigationIcon = { IconButton(onClose) { Icon(Icons.Default.KeyboardArrowDown, "Chiudi") } },
+                    actions = { IconToggle(IcLyrics, showLyrics, "Testo") { showLyrics = it } },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                )
+            },
+        ) { pad ->
+            Column(Modifier.padding(pad).fillMaxSize().padding(horizontal = 24.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                    if (showLyrics) Lyrics(song, player, prefs, Modifier.fillMaxSize())
+                    else ArtImage(art, Modifier.aspectRatio(1f).shadow(16.dp, RoundedCornerShape(20.dp)).clickable { showLyrics = true }, radius = 20.dp)
                 }
-                IconButton(player::next, Modifier.size(56.dp)) { Icon(IcNext, "Successivo", Modifier.size(36.dp)) }
-                IconToggle(IcRepeat, prefs.repeat, "Ripeti") { prefs.repeat = it }
+                Text(song.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "${song.artist} · ${song.album}", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(12.dp))
+                SeekBar(song, player)
+                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
+                    IconToggle(IcShuffle, prefs.shuffle, "Casuale") { prefs.shuffle = it }
+                    IconButton(player::prev, Modifier.size(56.dp)) { Icon(IcPrev, "Precedente", Modifier.size(36.dp)) }
+                    FilledIconButton(player::toggle, Modifier.size(72.dp)) {
+                        Icon(if (player.playing) IcPause else Icons.Default.PlayArrow, "Play/Pausa", Modifier.size(40.dp))
+                    }
+                    IconButton(player::next, Modifier.size(56.dp)) { Icon(IcNext, "Successivo", Modifier.size(36.dp)) }
+                    IconToggle(IcRepeat, prefs.repeat, "Ripeti") { prefs.repeat = it }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun SeekBar(song: Song, player: Player, showTime: Boolean = false) {
+private fun Lyrics(song: Song, player: Player, prefs: Prefs, modifier: Modifier) {
+    val ctx = LocalContext.current
+    val raw by produceState<String?>(null, song.id) {
+        value = withContext(Dispatchers.IO) {
+            prefs.lyrics(song.id)
+                ?: (ctx.contentResolver.embeddedLyrics(song.uri) ?: fetchLyrics(song))?.also { prefs.saveLyrics(song.id, it) }
+                ?: ""
+        }
+    }
+    val text = raw
+    val lines = remember(text) { parseLrc(text.orEmpty()) }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    when {
+        text == null -> Box(modifier, contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        text.isBlank() -> Box(modifier, contentAlignment = Alignment.Center) { Text("Testo non disponibile", color = muted) }
+        lines[0].time == null -> Column(modifier.verticalScroll(rememberScrollState())) {
+            Text(text, Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodyLarge, lineHeight = 28.sp, textAlign = TextAlign.Center)
+        }
+        else -> {
+            val pos = rememberPosition(song, player)
+            val active = lines.indexOfLast { it.time!! <= pos }
+            val state = rememberLazyListState()
+            LaunchedEffect(active) { if (active >= 0) state.animateScrollToItem(active, -state.layoutInfo.viewportSize.height / 3) }
+            LazyColumn(modifier, state, contentPadding = PaddingValues(vertical = 80.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                itemsIndexed(lines) { i, l ->
+                    val on = i == active
+                    Text(
+                        l.text.ifBlank { "♪" },
+                        Modifier.fillMaxWidth().clickable { player.seekTo(l.time!!.toInt()) }.padding(vertical = 6.dp),
+                        style = if (on) MaterialTheme.typography.titleLarge else MaterialTheme.typography.bodyLarge,
+                        fontWeight = if (on) FontWeight.Bold else null,
+                        color = if (on) MaterialTheme.colorScheme.primary else muted,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Posizione corrente del player, aggiornata ogni 300 ms. */
+@Composable
+private fun rememberPosition(song: Song, player: Player): Int {
     var pos by remember { mutableIntStateOf(0) }
+    LaunchedEffect(song, player.playing) { while (true) { pos = player.position; delay(300) } }
+    return pos
+}
+
+@Composable
+private fun SeekBar(song: Song, player: Player) {
+    val pos = rememberPosition(song, player)
     var drag by remember { mutableFloatStateOf(-1f) }
-    LaunchedEffect(song, player.playing) { while (true) { pos = player.position; delay(500) } }
     val value = if (drag >= 0) drag else pos.toFloat()
     Column {
         Slider(
             value = value,
             onValueChange = { drag = it },
-            onValueChangeFinished = { player.seekTo(drag.toInt()); pos = drag.toInt(); drag = -1f },
+            onValueChangeFinished = { player.seekTo(drag.toInt()); drag = -1f },
             valueRange = 0f..song.duration.toFloat().coerceAtLeast(1f),
         )
-        if (showTime) Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
             Text(fmt(value.toLong()), style = MaterialTheme.typography.labelSmall)
             Text(fmt(song.duration), style = MaterialTheme.typography.labelSmall)
         }
@@ -366,15 +476,20 @@ private fun AlbumArt(song: Song, modifier: Modifier, radius: Dp = 8.dp) {
     val ctx = LocalContext.current
     // ponytail: nessuna cache in memoria, MediaProvider ha già la sua su disco.
     val bmp by produceState<Bitmap?>(null, song.id) { value = withContext(Dispatchers.IO) { ctx.contentResolver.albumArt(song) } }
+    ArtImage(bmp, modifier, radius)
+}
+
+@Composable
+private fun ArtImage(bmp: Bitmap?, modifier: Modifier, radius: Dp) {
     Box(modifier.clip(RoundedCornerShape(radius)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-        val b = bmp
-        if (b != null) Image(b.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        if (bmp != null) Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         else Icon(IcMusicNote, null, Modifier.fillMaxSize(0.5f), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun SettingsScreen(prefs: Prefs) {
+    val ctx = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Section("Aspetto")
         Choice("Tema", listOf("system" to "Sistema", "light" to "Chiaro", "dark" to "Scuro"), prefs.theme) { prefs.theme = it }
@@ -399,8 +514,24 @@ private fun SettingsScreen(prefs: Prefs) {
         Section("Riproduzione")
         Toggle("Riproduzione casuale", prefs.shuffle) { prefs.shuffle = it }
         Toggle("Ripeti la coda", prefs.repeat) { prefs.repeat = it }
+        Section("Notifiche e lock screen")
+        val enabled = ctx.getSystemService(NotificationManager::class.java).areNotificationsEnabled()
+        Text(
+            if (enabled) "Notifiche attive: i controlli compaiono nella tendina, su lock screen e nel pannello media."
+            else "Notifiche disattivate: senza, Android non mostra i controlli su lock screen, pannello media o isola.",
+            style = MaterialTheme.typography.bodySmall, color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton({
+                ctx.startActivity(
+                    if (Build.VERSION.SDK_INT >= 26) Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                    else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
+                )
+            }) { Text("Notifiche app") }
+            OutlinedButton({ ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))) }) { Text("Info app") }
+        }
         Section("Info")
-        Text("Musica 1.2 · Le modifiche ai brani sono salvate nell'app, i file non vengono toccati.", style = MaterialTheme.typography.bodySmall)
+        Text("Musica 1.3 · Le modifiche ai brani sono salvate nell'app, i file non vengono toccati. Testi: tag del file o lrclib.net.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -447,7 +578,13 @@ private fun Toggle(label: String, on: Boolean, set: (Boolean) -> Unit) =
 
 @Composable
 private fun IconToggle(icon: ImageVector, on: Boolean, desc: String, set: (Boolean) -> Unit) =
-    IconButton({ set(!on) }) { Icon(icon, desc, tint = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+    IconButton(
+        { set(!on) },
+        colors = IconButtonDefaults.iconButtonColors(
+            containerColor = if (on) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+            contentColor = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+    ) { Icon(icon, desc) }
 
 @Composable
 private fun Choice(label: String, options: List<Pair<String, String>>, value: String, set: (String) -> Unit) {
@@ -470,4 +607,5 @@ private val IcMusicNote = vec("M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79
 private val IcAlbum = vec("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z")
 private val IcShuffle = vec("M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z")
 private val IcRepeat = vec("M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z")
+private val IcLyrics = vec("M14 17H4v2h10v-2zm6-8H4v2h16V9zM4 15h16v-2H4v2zM4 5v2h16V5H4z")
 private val TAB_ICONS = listOf(IcMusicNote, IcAlbum, Icons.Default.Person, Icons.Default.Settings)
