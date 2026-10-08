@@ -7,6 +7,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
+/**
+ * Coda in stile Spotify: [upNext] (brani aggiunti a mano) ha la precedenza, poi si continua con il contesto
+ * [queue] (album/lista avviata) dall'ultimo brano di contesto riprodotto. Avviare un nuovo contesto non svuota [upNext].
+ */
 class Player(private val ctx: Context, private val prefs: Prefs) {
     private val mp = MediaPlayer().apply { setOnCompletionListener { next(auto = true) } }
 
@@ -14,11 +18,30 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     var onChange: () -> Unit = {}
 
     var queue: List<Song> by mutableStateOf(emptyList()); private set
+    var queueName by mutableStateOf(""); private set
+    var upNext: List<Song> by mutableStateOf(emptyList()); private set
     var current: Song? by mutableStateOf(null); private set
     var playing by mutableStateOf(false); private set
     val position: Int get() = if (current == null) 0 else mp.currentPosition
 
-    fun play(list: List<Song>, song: Song) { queue = list; start(song) }
+    private var ctxId: Long? = null // ultimo brano di contesto riprodotto (i brani di upNext non lo spostano)
+    private val ctxPos get() = queue.indexOfFirst { it.id == ctxId }
+
+    /** Brani di contesto che seguono quello corrente. */
+    val nextInContext: List<Song> get() = queue.drop(ctxPos + 1)
+
+    fun play(list: List<Song>, song: Song, name: String) {
+        queue = list
+        queueName = name
+        ctxId = song.id
+        start(song)
+    }
+
+    fun enqueue(song: Song) { upNext = upNext + song }
+    fun removeUpNext(i: Int) { upNext = upNext.filterIndexed { j, _ -> j != i } }
+    fun clearUpNext() { upNext = emptyList() }
+    fun playUpNext(i: Int) { val s = upNext[i]; removeUpNext(i); start(s) }
+    fun playInContext(song: Song) { ctxId = song.id; start(song) }
 
     fun toggle() {
         if (current == null) return
@@ -28,20 +51,22 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     }
 
     fun next(auto: Boolean = false) {
-        val i = index()
-        if (i < 0) return
-        when {
-            prefs.shuffle && queue.size > 1 -> start(queue.filterIndexed { j, _ -> j != i }.random())
-            i + 1 < queue.size -> start(queue[i + 1])
-            prefs.repeat || !auto -> start(queue[0])
-            else -> { playing = false; onChange() }
+        if (upNext.isNotEmpty()) { playUpNext(0); return }
+        val i = when {
+            queue.isEmpty() -> -1
+            prefs.shuffle && queue.size > 1 -> (queue.indices - ctxPos).random()
+            ctxPos + 1 < queue.size -> ctxPos + 1
+            prefs.repeat || !auto -> 0
+            else -> -1
         }
+        if (i < 0) { playing = false; onChange(); return }
+        playInContext(queue[i])
     }
 
     fun prev() {
-        val i = index()
-        if (i < 0) return
-        if (mp.currentPosition > 3000) mp.seekTo(0) else start(queue[(i - 1).mod(queue.size)])
+        if (current == null) return
+        if (mp.currentPosition > 3000 || queue.isEmpty()) { mp.seekTo(0); onChange(); return }
+        playInContext(queue[(ctxPos - 1).mod(queue.size)])
     }
 
     fun seekTo(ms: Int) { if (current != null) { mp.seekTo(ms); onChange() } }
@@ -53,16 +78,22 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         onChange()
     }
 
-    /** Dopo una modifica ai metadati, aggiorna coda e brano corrente con le nuove versioni. */
+    /** Dopo una modifica ai metadati, aggiorna code e brano corrente con le nuove versioni. */
     fun refresh(all: List<Song>) {
         val byId = all.associateBy { it.id }
         queue = queue.map { byId[it.id] ?: it }
+        upNext = upNext.map { byId[it.id] ?: it }
         current = current?.let { byId[it.id] ?: it }
     }
 
-    fun release() = mp.release()
+    /** Brano eliminato dal dispositivo: via dalle code; se era in riproduzione passa al successivo. */
+    fun remove(id: Long) {
+        if (current?.id == id) { next(); if (current?.id == id) stop() }
+        upNext = upNext.filter { it.id != id }
+        queue = queue.filter { it.id != id }
+    }
 
-    private fun index() = queue.indexOfFirst { it.id == current?.id }
+    fun release() = mp.release()
 
     private fun start(song: Song) {
         current = song

@@ -17,8 +17,8 @@ android {
         applicationId = "com.example.mp3"
         minSdk = 24
         targetSdk = 35
-        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt() ?: 4  // su Actions cresce da solo a ogni build
-        versionName = "1.3"
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt() ?: 5  // su Actions cresce da solo a ogni build
+        versionName = "1.4"
     }
     signingConfigs {
         create("release") {

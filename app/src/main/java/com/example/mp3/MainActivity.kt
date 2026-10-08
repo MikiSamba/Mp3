@@ -3,6 +3,8 @@
 package com.example.mp3
 
 import android.Manifest
+import android.app.Activity
+import android.app.RecoverableSecurityException
 import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
@@ -14,12 +16,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.MediaStore
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -54,7 +59,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
@@ -63,6 +70,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
@@ -202,7 +211,27 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
     var group by remember { mutableStateOf<String?>(null) }   // album o artista aperto
     var query by remember { mutableStateOf<String?>(null) }   // null = ricerca chiusa
     var editing by remember { mutableStateOf<Song?>(null) }
+    var deleting by remember { mutableStateOf<Song?>(null) }   // in attesa di conferma (sistema o nostra)
     var nowPlaying by remember { mutableStateOf(false) }
+    fun deleted(s: Song) { player.remove(s.id); raw = raw.filter { it.id != s.id } }
+    val systemDelete = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { r ->
+        deleting?.let { if (r.resultCode == Activity.RESULT_OK) deleted(it) }
+        deleting = null
+    }
+    // ponytail: su Android 11+ conferma di sistema; su 10 RecoverableSecurityException; sotto serve WRITE_EXTERNAL_STORAGE, non richiesto.
+    fun requestDelete(s: Song) {
+        deleting = s
+        if (Build.VERSION.SDK_INT >= 30) {
+            systemDelete.launch(IntentSenderRequest.Builder(MediaStore.createDeleteRequest(ctx.contentResolver, listOf(s.uri)).intentSender).build())
+        }
+    }
+    fun confirmedDelete(s: Song) {
+        try { ctx.contentResolver.delete(s.uri, null, null); deleted(s); deleting = null }
+        catch (e: SecurityException) {
+            if (Build.VERSION.SDK_INT >= 29 && e is RecoverableSecurityException) systemDelete.launch(IntentSenderRequest.Builder(e.userAction.actionIntent.intentSender).build())
+            else { Toast.makeText(ctx, "Impossibile eliminare su questa versione di Android", Toast.LENGTH_SHORT).show(); deleting = null }
+        }
+    }
     LaunchedEffect(nowPlayingRequest) { if (nowPlayingRequest > 0) nowPlaying = true }
     LaunchedEffect(player.current == null) { if (player.current == null) nowPlaying = false }
     BackHandler(group != null || query != null) { group = null; query = null }
@@ -251,9 +280,9 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
                 tab == 3 -> SettingsScreen(prefs)
                 group != null -> {
                     val inGroup = shown.filter { (if (tab == 1) it.album else it.artist) == group }
-                    SongList(if (tab == 1) inGroup.sortedBy { it.track } else inGroup, player, prefs) { editing = it }
+                    SongList(if (tab == 1) inGroup.sortedBy { it.track } else inGroup, group!!, player, prefs, { editing = it }, ::requestDelete)
                 }
-                tab == 0 -> SongList(shown, player, prefs) { editing = it }
+                tab == 0 -> SongList(shown, if (query.isNullOrBlank()) "Brani" else "Ricerca", player, prefs, { editing = it }, ::requestDelete)
                 tab == 1 -> AlbumGrid(shown.groupBy { it.album }) { group = it }
                 else -> ArtistList(shown.groupBy { it.artist }) { group = it }
             }
@@ -263,11 +292,21 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
     editing?.let { s ->
         EditDialog(s, onDismiss = { editing = null }) { t, a, al -> prefs.saveEdit(s.id, t, a, al); editing = null }
     }
+    deleting?.takeIf { Build.VERSION.SDK_INT < 30 }?.let { s ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Eliminare il brano?") },
+            text = { Text("\"${s.title}\" verrà cancellato dal dispositivo.") },
+            confirmButton = { TextButton({ confirmedDelete(s) }) { Text("Elimina") } },
+            dismissButton = { TextButton({ deleting = null }) { Text("Annulla") } },
+        )
+    }
 }
 
 @Composable
-private fun SongList(songs: List<Song>, player: Player, prefs: Prefs, onEdit: (Song) -> Unit) {
+private fun SongList(songs: List<Song>, name: String, player: Player, prefs: Prefs, onEdit: (Song) -> Unit, onDelete: (Song) -> Unit) {
     if (songs.isEmpty()) return Center("Nessun brano")
+    val ctx = LocalContext.current
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 8.dp)) {
         items(songs, key = { it.id }) { s ->
             val isCurrent = s.id == player.current?.id
@@ -281,11 +320,19 @@ private fun SongList(songs: List<Song>, player: Player, prefs: Prefs, onEdit: (S
                 trailingContent = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (prefs.showDuration) Text(fmt(s.duration), style = MaterialTheme.typography.bodySmall)
-                        IconButton({ onEdit(s) }) { Icon(Icons.Default.Edit, "Modifica") }
+                        var menu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
+                            DropdownMenu(menu, { menu = false }) {
+                                DropdownMenuItem({ Text("Aggiungi alla coda") }, { menu = false; player.enqueue(s); Toast.makeText(ctx, "Aggiunto alla coda", Toast.LENGTH_SHORT).show() }, leadingIcon = { Icon(IcPlaylistAdd, null) })
+                                DropdownMenuItem({ Text("Modifica") }, { menu = false; onEdit(s) }, leadingIcon = { Icon(Icons.Default.Edit, null) })
+                                DropdownMenuItem({ Text("Elimina dal dispositivo") }, { menu = false; onDelete(s) }, leadingIcon = { Icon(Icons.Default.Delete, null) })
+                            }
+                        }
                     }
                 },
                 colors = ListItemDefaults.colors(containerColor = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent),
-                modifier = Modifier.clickable { player.play(songs, s) },
+                modifier = Modifier.clickable { player.play(songs, s, name) },
             )
         }
     }
@@ -355,7 +402,9 @@ private fun PlayerBar(song: Song, player: Player, onOpen: () -> Unit) {
 
 @Composable
 private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> Unit) {
-    BackHandler(onBack = onClose)
+    var showQueue by remember { mutableStateOf(false) }
+    BackHandler { if (showQueue) showQueue = false else onClose() }
+    if (showQueue) return QueueScreen(player) { showQueue = false }
     val ctx = LocalContext.current
     val art by produceState<Bitmap?>(null, song.id) { value = withContext(Dispatchers.IO) { ctx.contentResolver.albumArt(song) } }
     val primary = MaterialTheme.colorScheme.primary
@@ -372,7 +421,10 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
                 TopAppBar(
                     title = { Text("In riproduzione") },
                     navigationIcon = { IconButton(onClose) { Icon(Icons.Default.KeyboardArrowDown, "Chiudi") } },
-                    actions = { IconToggle(IcLyrics, showLyrics, "Testo") { showLyrics = it } },
+                    actions = {
+                        IconToggle(IcLyrics, showLyrics, "Testo") { showLyrics = it }
+                        IconButton({ showQueue = true }) { Icon(IcQueue, "Coda") }
+                    },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                 )
             },
@@ -401,6 +453,46 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
             }
         }
     }
+}
+
+@Composable
+private fun QueueScreen(player: Player, onClose: () -> Unit) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Coda") },
+                navigationIcon = { IconButton(onClose) { Icon(Icons.Default.KeyboardArrowDown, "Chiudi") } },
+                actions = { if (player.upNext.isNotEmpty()) TextButton(player::clearUpNext) { Text("Svuota coda") } },
+            )
+        },
+    ) { pad ->
+        // ponytail: niente riordino col trascinamento; rimozione e salto al brano bastano per ora.
+        LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+            player.current?.let { item { Section("In riproduzione", Modifier.padding(horizontal = 16.dp)); QueueRow(it, true) } }
+            if (player.upNext.isNotEmpty()) {
+                item { Section("Prossimi in coda", Modifier.padding(horizontal = 16.dp)) }
+                itemsIndexed(player.upNext) { i, s -> QueueRow(s, onClick = { player.playUpNext(i) }, onRemove = { player.removeUpNext(i) }) }
+            }
+            val rest = player.nextInContext
+            if (rest.isNotEmpty()) {
+                item { Section("Prossimi da: ${player.queueName}", Modifier.padding(horizontal = 16.dp)) }
+                items(rest, key = { it.id }) { s -> QueueRow(s, onClick = { player.playInContext(s) }) }
+            }
+            if (player.upNext.isEmpty() && rest.isEmpty()) item { Text("Niente in coda", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    }
+}
+
+@Composable
+private fun QueueRow(s: Song, highlight: Boolean = false, onClick: (() -> Unit)? = null, onRemove: (() -> Unit)? = null) {
+    ListItem(
+        headlineContent = { Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (highlight) FontWeight.Bold else null, color = if (highlight) MaterialTheme.colorScheme.primary else Color.Unspecified) },
+        supportingContent = { Text(s.artist, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        leadingContent = { AlbumArt(s, Modifier.size(44.dp), radius = 8.dp) },
+        trailingContent = { if (onRemove != null) IconButton(onRemove) { Icon(Icons.Default.Close, "Rimuovi") } },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
+    )
 }
 
 @Composable
@@ -531,7 +623,7 @@ private fun SettingsScreen(prefs: Prefs) {
             OutlinedButton({ ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))) }) { Text("Info app") }
         }
         Section("Info")
-        Text("Musica 1.3 · Le modifiche ai brani sono salvate nell'app, i file non vengono toccati. Testi: tag del file o lrclib.net.", style = MaterialTheme.typography.bodySmall)
+        Text("Musica 1.4 · Le modifiche ai brani sono salvate nell'app, i file non vengono toccati. Testi: tag del file o lrclib.net.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -569,8 +661,8 @@ private fun NoPermission(ask: () -> Unit) {
 private fun Center(text: String) = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text(text) }
 
 @Composable
-private fun Section(title: String) =
-    Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
+private fun Section(title: String, modifier: Modifier = Modifier) =
+    Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary, modifier = modifier.padding(top = 8.dp))
 
 @Composable
 private fun Toggle(label: String, on: Boolean, set: (Boolean) -> Unit) =
@@ -607,5 +699,7 @@ private val IcMusicNote = vec("M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79
 private val IcAlbum = vec("M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z")
 private val IcShuffle = vec("M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z")
 private val IcRepeat = vec("M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z")
+private val IcQueue = vec("M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z")
+private val IcPlaylistAdd = vec("M14 10H3v2h11v-2zm0-4H3v2h11V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM3 16h7v-2H3v2z")
 private val IcLyrics = vec("M14 17H4v2h10v-2zm6-8H4v2h16V9zM4 15h16v-2H4v2zM4 5v2h16V5H4z")
 private val TAB_ICONS = listOf(IcMusicNote, IcAlbum, Icons.Default.Person, Icons.Default.Settings)
