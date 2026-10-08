@@ -46,3 +46,43 @@ class LyricsTest {
         assertNull(parseLrc("solo testo\nsemplice")[0].time)
     }
 }
+
+class TagsTest {
+    private fun frame(id: String, body: ByteArray): ByteArray {
+        val n = body.size
+        return id.toByteArray(Charsets.ISO_8859_1) + byteArrayOf((n shr 24).toByte(), (n shr 16).toByte(), (n shr 8).toByte(), n.toByte()) + byteArrayOf(0, 0) + body
+    }
+    private fun v23(frames: ByteArray): ByteArray {
+        val n = frames.size
+        return byteArrayOf('I'.code.toByte(), 'D'.code.toByte(), '3'.code.toByte(), 3, 0, 0,
+            (n shr 21 and 0x7F).toByte(), (n shr 14 and 0x7F).toByte(), (n shr 7 and 0x7F).toByte(), (n and 0x7F).toByte()) + frames
+    }
+    private fun textOf(data: ByteArray, id: String): String? {
+        val size = syncsafe(data, 6); var p = 10
+        while (p + 10 <= 10 + size && data[p] != 0.toByte()) {
+            val fid = String(data, p, 4, Charsets.ISO_8859_1); val len = syncsafe(data, p + 4)
+            if (fid == id) return String(data, p + 11, len - 1, Charsets.UTF_8)
+            p += 10 + len
+        }
+        return null
+    }
+
+    @Test fun `rewrite keeps lyrics and audio and replaces title`() {
+        val audio = ByteArray(300) { (it % 251).toByte() }
+        val src = v23(frame("TIT2", byteArrayOf(3) + "Vecchio".toByteArray()) + frame("USLT", byteArrayOf(3) + "ita".toByteArray() + byteArrayOf(0) + "Testo".toByteArray())) + audio
+        val out = rewriteId3(src, "Nuovo", "Artista", "Album")!!
+        assertEquals(4, out[3].toInt())
+        assertEquals("Nuovo", textOf(out, "TIT2"))
+        assertEquals("Artista", textOf(out, "TPE1"))
+        assertEquals("Album", textOf(out, "TALB"))
+        assertEquals("Testo", parseUslt(java.io.ByteArrayInputStream(out)))
+        assertEquals(audio.toList(), out.copyOfRange(out.size - audio.size, out.size).toList())
+    }
+
+    @Test fun `file without tag gets a new one`() {
+        val audio = ByteArray(50) { 7 }
+        val out = rewriteId3(audio, "T", "A", "B")!!
+        assertEquals("T", textOf(out, "TIT2"))
+        assertEquals(audio.toList(), out.copyOfRange(out.size - 50, out.size).toList())
+    }
+}

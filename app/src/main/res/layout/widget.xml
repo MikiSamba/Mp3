@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:padding="8dp"
+    android:background="@drawable/widget_bg">
+    <ImageView
+        android:id="@+id/art"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:scaleType="centerCrop"
+        android:contentDescription="@null"
+        android:src="@drawable/ic_note" />
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginStart="12dp"
+        android:orientation="vertical">
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFF"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:text="Musica" />
+        <TextView
+            android:id="@+id/artist"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#DDFFFFFF"
+            android:textSize="13sp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:text="Tocca per aprire" />
+    </LinearLayout>
+    <ImageButton android:id="@+id/prev" style="@style/WidgetButton" android:src="@android:drawable/ic_media_previous" android:contentDescription="Precedente" />
+    <ImageButton android:id="@+id/play" style="@style/WidgetButton" android:src="@android:drawable/ic_media_play" android:contentDescription="Play/Pausa" />
+    <ImageButton android:id="@+id/next" style="@style/WidgetButton" android:src="@android:drawable/ic_media_next" android:contentDescription="Successivo" />
+</LinearLayout>

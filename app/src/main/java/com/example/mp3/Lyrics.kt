@@ -57,10 +57,10 @@ internal fun parseUslt(s: InputStream): String? {
     return null
 }
 
-private fun syncsafe(b: ByteArray, o: Int) =
+internal fun syncsafe(b: ByteArray, o: Int) =
     ((b[o].toInt() and 0x7F) shl 21) or ((b[o + 1].toInt() and 0x7F) shl 14) or ((b[o + 2].toInt() and 0x7F) shl 7) or (b[o + 3].toInt() and 0x7F)
 
-private fun int32(b: ByteArray, o: Int) =
+internal fun int32(b: ByteArray, o: Int) =
     ((b[o].toInt() and 0xFF) shl 24) or ((b[o + 1].toInt() and 0xFF) shl 16) or ((b[o + 2].toInt() and 0xFF) shl 8) or (b[o + 3].toInt() and 0xFF)
 
 /** Cerca il testo su lrclib.net (gratuito, senza chiave). Preferisce quello sincronizzato. */

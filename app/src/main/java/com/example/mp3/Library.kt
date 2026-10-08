@@ -104,6 +104,9 @@ class Prefs private constructor(ctx: Context) {
     var eqPreset by pref("eqPreset", -1)       // -1 = livelli personalizzati
     var eqBands by pref("eqBands", "")         // livelli separati da virgola
     var bassBoost by pref("bassBoost", 0)      // 0..1000
+    var crossfade by pref("crossfade", 0)      // secondi, 0 = spenta
+    var visualizer by pref("visualizer", false)
+    var skipBuild by pref("skipBuild", 0)      // build GitHub di cui l'utente ha rifiutato l'avviso
 
     var editsVersion by mutableIntStateOf(0); private set
 
