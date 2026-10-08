@@ -79,6 +79,31 @@ class TagsTest {
         assertEquals(audio.toList(), out.copyOfRange(out.size - audio.size, out.size).toList())
     }
 
+    private fun frameOf(data: ByteArray, id: String): ByteArray? {
+        val size = syncsafe(data, 6); var p = 10
+        while (p + 10 <= 10 + size && data[p] != 0.toByte()) {
+            val fid = String(data, p, 4, Charsets.ISO_8859_1); val len = syncsafe(data, p + 4)
+            if (fid == id) return data.copyOfRange(p + 10, p + 10 + len)
+            p += 10 + len
+        }
+        return null
+    }
+
+    @Test fun `extended edit writes genre year lyrics and cover, removes old year and blank genre`() {
+        val src = v23(frame("TYER", byteArrayOf(3) + "1999".toByteArray()) + frame("TCON", byteArrayOf(3) + "Rock".toByteArray())) + ByteArray(20)
+        val cover = byteArrayOf(1, 2, 3, 4)
+        val out = rewriteId3(src, TagEdit(mapOf("TIT2" to "T", "TCON" to "", "TDRC" to "2024"), lyrics = "La la", cover = cover))!!
+        assertEquals("2024", textOf(out, "TDRC"))
+        assertEquals("2024", textOf(out, "TYER")) // anche il frame vecchio: è l'unico che Android legge
+        assertEquals(1, out.toList().windowed(4).count { it == "TYER".toByteArray().toList() })
+        assertNull(frameOf(out, "TCON"))
+        assertEquals("La la", parseUslt(java.io.ByteArrayInputStream(out)))
+        val apic = frameOf(out, "APIC")!!
+        assertEquals(3, apic[0].toInt())
+        assertEquals("image/jpeg", String(apic, 1, 10, Charsets.ISO_8859_1))
+        assertEquals(cover.toList(), apic.copyOfRange(apic.size - 4, apic.size).toList())
+    }
+
     @Test fun `file without tag gets a new one`() {
         val audio = ByteArray(50) { 7 }
         val out = rewriteId3(audio, "T", "A", "B")!!

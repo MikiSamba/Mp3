@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Solo per il visualizzatore audio (Android lo richiede per leggere l'uscita audio); chiesto quando lo attivi. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Solo per "Imposta come suoneria": chiesto al momento, dalla schermata di sistema. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
 
     <application
         android:name=".App"
@@ -25,6 +27,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
         <service
             android:name=".PlaybackService"

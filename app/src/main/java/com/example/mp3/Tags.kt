@@ -3,11 +3,20 @@ package com.example.mp3
 import java.io.ByteArrayOutputStream
 
 /**
- * Riscrive titolo/artista/album nel tag ID3v2 di un MP3 conservando gli altri frame (copertina, testo...).
- * Produce un tag ID3v2.4 (UTF-8). null = tag non gestito (ID3v2.2 o unsynchronisation).
+ * Modifiche da scrivere nel tag: [text] = frame di testo (TIT2, TPE1, TALB, TCON, TDRC, TRCK...; valore vuoto = frame rimosso),
+ * [lyrics] = testo (USLT), [cover] = copertina (APIC). null = lascia com'è.
+ */
+class TagEdit(val text: Map<String, String> = emptyMap(), val lyrics: String? = null, val cover: ByteArray? = null, val coverMime: String = "image/jpeg")
+
+fun rewriteId3(data: ByteArray, title: String, artist: String, album: String): ByteArray? =
+    rewriteId3(data, TagEdit(mapOf("TIT2" to title, "TPE1" to artist, "TALB" to album)))
+
+/**
+ * Riscrive i frame indicati nel tag ID3v2 di un MP3 conservando gli altri. Produce un tag ID3v2.4 (UTF-8).
+ * null = tag non gestito (ID3v2.2 o unsynchronisation).
  */
 // ponytail: i flag dei frame originali vengono azzerati; frame compressi o con unsync per-frame (rarissimi) andrebbero decodificati.
-fun rewriteId3(data: ByteArray, title: String, artist: String, album: String): ByteArray? {
+fun rewriteId3(data: ByteArray, edit: TagEdit): ByteArray? {
     var audioStart = 0
     val frames = mutableListOf<Pair<String, ByteArray>>()
     if (data.size >= 10 && String(data, 0, 3, Charsets.ISO_8859_1) == "ID3") {
@@ -27,9 +36,18 @@ fun rewriteId3(data: ByteArray, title: String, artist: String, album: String): B
             p += 10 + len
         }
     }
-    fun text(id: String, s: String) = id to (byteArrayOf(3) + s.toByteArray(Charsets.UTF_8))
-    val all = listOf(text("TIT2", title), text("TPE1", artist), text("TALB", album)) +
-        frames.filter { it.first !in setOf("TIT2", "TPE1", "TALB") }
+    val utf8 = byteArrayOf(3)
+    val replaced = edit.text.keys.toMutableSet()
+    if ("TDRC" in replaced) replaced += "TYER" // anno: in v2.4 è TDRC, in v2.3 era TYER
+    if (edit.lyrics != null) replaced += "USLT"
+    if (edit.cover != null) replaced += "APIC"
+    val fresh = mutableListOf<Pair<String, ByteArray>>()
+    for ((id, v) in edit.text) if (v.isNotBlank()) fresh += id to (utf8 + v.toByteArray(Charsets.UTF_8))
+    // Android legge l'anno solo dal vecchio TYER (non da TDRC): scritti entrambi, così MediaStore lo vede.
+    edit.text["TDRC"]?.take(4)?.takeIf { it.isNotBlank() }?.let { fresh += "TYER" to (utf8 + it.toByteArray(Charsets.UTF_8)) }
+    edit.lyrics?.let { fresh += "USLT" to (utf8 + "ita".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(0) + it.toByteArray(Charsets.UTF_8)) }
+    edit.cover?.let { fresh += "APIC" to (utf8 + edit.coverMime.toByteArray(Charsets.ISO_8859_1) + byteArrayOf(0, 3, 0) + it) } // tipo 3 = copertina frontale
+    val all = fresh + frames.filter { it.first !in replaced }
     val body = ByteArrayOutputStream()
     for ((id, b) in all) {
         body.write(id.toByteArray(Charsets.ISO_8859_1))

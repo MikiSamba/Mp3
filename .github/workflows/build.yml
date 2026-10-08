@@ -18,7 +18,7 @@ jobs:
         run: echo "$KEYSTORE_B64" | base64 -d > keystore.jks
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
-      - run: ./gradlew assembleRelease --no-daemon
+      - run: ./gradlew testReleaseUnitTest assembleRelease --no-daemon
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       - name: Publish APK to "latest" release

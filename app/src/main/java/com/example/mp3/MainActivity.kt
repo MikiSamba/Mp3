@@ -11,7 +11,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.RingtoneManager
+import android.os.Handler
+import android.os.Looper
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +32,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -39,6 +45,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -75,6 +82,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
@@ -174,6 +183,12 @@ private val SLEEP = listOf(15, 30, 45, 60, 90)
 class MainActivity : ComponentActivity() {
     private var player by mutableStateOf<Player?>(null)
     private var nowPlayingRequest by mutableIntStateOf(0)
+    private var shortcut by mutableStateOf<Pair<String, Int>?>(null) // scorciatoia dall'icona + contatore per rilanciarla
+    private var shortcutN = 0
+    private fun handle(intent: Intent) {
+        if (intent.getBooleanExtra(EXTRA_NOW_PLAYING, false)) nowPlayingRequest++
+        intent.getStringExtra("shortcut")?.let { shortcut = it to ++shortcutN }
+    }
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) { player = (binder as PlaybackService.LocalBinder).player }
         override fun onServiceDisconnected(name: ComponentName) { player = null }
@@ -182,16 +197,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (intent.getBooleanExtra(EXTRA_NOW_PLAYING, false)) nowPlayingRequest++
+        handle(intent)
         val prefs = Prefs.of(this)
         setContent {
-            Themed(prefs) { Surface(Modifier.fillMaxSize()) { player?.let { App(prefs, it, nowPlayingRequest) } } }
+            Themed(prefs) { Surface(Modifier.fillMaxSize()) { player?.let { App(prefs, it, nowPlayingRequest, shortcut) } } }
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_NOW_PLAYING, false)) nowPlayingRequest++
+        handle(intent)
     }
 
     override fun onStart() {
@@ -208,7 +223,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun Themed(prefs: Prefs, content: @Composable () -> Unit) {
-    val dark = when (prefs.theme) { "light" -> false; "dark" -> true; else -> isSystemInDarkTheme() }
+    val dark = when (prefs.theme) { "light" -> false; "dark", "amoled" -> true; else -> isSystemInDarkTheme() }
     val ctx = LocalContext.current
     // Icone delle barre di sistema coerenti col tema scelto nell'app, non solo con quello di sistema.
     LaunchedEffect(dark) {
@@ -222,11 +237,16 @@ private fun Themed(prefs: Prefs, content: @Composable () -> Unit) {
         dark -> darkColorScheme(primary = accent, onPrimary = Color.White, secondary = accent, primaryContainer = accent.copy(alpha = 0.3f), secondaryContainer = accent.copy(alpha = 0.2f))
         else -> lightColorScheme(primary = accent, secondary = accent, primaryContainer = accent.copy(alpha = 0.15f), secondaryContainer = accent.copy(alpha = 0.12f))
     }
-    MaterialTheme(colorScheme = scheme, content = content)
+    // Tema "Nero": superfici nere pure, che sugli schermi OLED restano spente.
+    val black = if (prefs.theme == "amoled") scheme.copy(
+        background = Color.Black, surface = Color.Black, surfaceContainerLowest = Color.Black, surfaceContainerLow = Color.Black,
+        surfaceContainer = Color(0xFF0E0E0E), surfaceContainerHigh = Color(0xFF181818), surfaceContainerHighest = Color(0xFF222222), surfaceVariant = Color(0xFF222222),
+    ) else scheme
+    MaterialTheme(colorScheme = black, content = content)
 }
 
 @Composable
-private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
+private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: Pair<String, Int>?) {
     val ctx = LocalContext.current
     val perms = if (Build.VERSION.SDK_INT >= 33) arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
                 else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -236,7 +256,13 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
 
     var raw by remember { mutableStateOf(emptyList<Song>()) }
     var reloads by remember { mutableIntStateOf(0) }
-    LaunchedEffect(granted, reloads) { if (granted) raw = withContext(Dispatchers.IO) { ctx.contentResolver.loadSongs() } }
+    LaunchedEffect(granted, reloads) { if (granted) { if (reloads > 0) delay(500); raw = withContext(Dispatchers.IO) { ctx.contentResolver.loadSongs() } } }
+    // Libreria aggiornata da sola quando MediaStore cambia (file copiati o cancellati, tag riscritti).
+    DisposableEffect(granted) {
+        val obs = object : ContentObserver(Handler(Looper.getMainLooper())) { override fun onChange(selfChange: Boolean) { reloads++ } }
+        if (granted) ctx.contentResolver.registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, obs)
+        onDispose { ctx.contentResolver.unregisterContentObserver(obs) }
+    }
     val songs = remember(raw, prefs.editsVersion, prefs.sort) {
         raw.map(prefs::applyEdits).sortedWith(
             when (prefs.sort) {
@@ -254,10 +280,23 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
     var group by remember { mutableStateOf<String?>(null) }   // album, artista, FAV, RECENT o PL+nome aperto
     var query by remember { mutableStateOf<String?>(null) }   // null = ricerca chiusa
     var editing by remember { mutableStateOf<Song?>(null) }
+    var info by remember { mutableStateOf<Song?>(null) }
     var deleting by remember { mutableStateOf<Song?>(null) }   // in attesa di conferma (sistema o nostra)
     var toPlaylist by remember { mutableStateOf<Song?>(null) }
     var nowPlaying by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    // Scorciatoie dall'icona: eseguite appena la libreria è caricata, una volta sola.
+    var shortcutDone by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    LaunchedEffect(shortcut, songs.isEmpty()) {
+        val s = shortcut ?: return@LaunchedEffect
+        if (songs.isEmpty() || s == shortcutDone) return@LaunchedEffect
+        shortcutDone = s
+        when (s.first) {
+            "shuffle" -> { prefs.shuffle = true; player.play(songs, songs.random(), "Brani"); nowPlaying = true }
+            "fav" -> { tab = 3; group = FAV }
+        }
+    }
 
     // Avviso aggiornamenti: confronta la build installata con quella pubblicata su GitHub.
     var update by remember { mutableStateOf<Int?>(null) }
@@ -279,7 +318,10 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
             val r = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = ctx.contentResolver.openInputStream(w.song.uri)!!.use { it.readBytes() }
-                    val out = rewriteId3(bytes, w.title, w.artist, w.album) ?: return@runCatching "Tag non gestito (serve ID3v2.3 o 2.4)"
+                    // Campi vuoti = lasciati come sono nel file (Android non legge l'anno in TDRC: un campo vuoto non deve cancellarlo).
+                    val text = mapOf("TIT2" to w.title, "TPE1" to w.artist, "TALB" to w.album, "TCON" to w.genre, "TDRC" to w.year, "TRCK" to w.track).filterValues { it.isNotBlank() }
+                    val edit = TagEdit(text, w.lyrics, w.cover)
+                    val out = rewriteId3(bytes, edit) ?: return@runCatching "Tag non gestito (serve ID3v2.3 o 2.4)"
                     ctx.contentResolver.openOutputStream(w.song.uri, "wt")!!.use { it.write(out) }
                     null
                 }
@@ -291,6 +333,7 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
                 r.getOrNull() != null -> Toast.makeText(ctx, r.getOrNull(), Toast.LENGTH_LONG).show()
                 else -> {
                     prefs.saveEdit(w.song.id, null, null, null)
+                    if (w.cover != null) invalidateArt(w.song.albumId)
                     Toast.makeText(ctx, "Tag scritti nel file", Toast.LENGTH_SHORT).show()
                     delay(1500); reloads++ // MediaStore rianalizza il file alla chiusura
                 }
@@ -330,7 +373,9 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
     }
 
     val q = query.orEmpty().trim()
-    fun matches(s: Song) = q.isEmpty() || listOf(s.title, s.artist, s.album).any { it.contains(q, ignoreCase = true) }
+    // Cerca in titolo, artista, album, genere e nei testi già scaricati o letti dal file.
+    fun matches(s: Song) = q.isEmpty() || listOf(s.title, s.artist, s.album, s.genre).any { it.contains(q, ignoreCase = true) } ||
+        prefs.lyrics(s.id)?.contains(q, ignoreCase = true) == true
     val shown = remember(songs, q) { songs.filter(::matches) }
     val g = group
     val groupTitle = when {
@@ -379,20 +424,23 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
             },
         ) { pad ->
             Box(Modifier.padding(pad)) {
-                val list: @Composable (List<Song>, String) -> Unit = { l, name ->
+                val list: @Composable (List<Song>, String, (@Composable () -> Unit)?) -> Unit = { l, name, header ->
                     SongList(
-                        l, name, player, prefs, onEdit = { editing = it }, onDelete = ::requestDelete, onAddToPlaylist = { toPlaylist = it },
+                        l, name, player, prefs, onEdit = { editing = it }, onDelete = ::requestDelete, onAddToPlaylist = { toPlaylist = it }, onInfo = { info = it },
                         onRemoveFromPlaylist = inPlaylist?.let { pl -> { s: Song -> prefs.setPlaylist(pl, prefs.playlists[pl].orEmpty() - s.id) } },
-                        fastScroll = name == "Brani" && prefs.sort == "title",
+                        fastScroll = name == "Brani" && prefs.sort == "title", header = header,
                     )
                 }
+                // Album e artisti aperti hanno la testata con copertina, dati e tasti Riproduci / Casuale.
+                val header: (@Composable () -> Unit)? =
+                    if (g != null && g != FAV && g != RECENT && !g.startsWith(PL)) ({ GroupHeader(groupSongs, groupTitle!!, tab == 1, player, prefs) }) else null
                 when {
                     !granted -> NoPermission { ask.launch(perms) }
                     tab == 4 -> SettingsScreen(prefs) { reloads++ }
-                    group != null -> list(groupSongs, groupTitle!!)
+                    group != null -> list(groupSongs, groupTitle!!, header)
                     tab == 3 -> LibraryScreen(prefs, songs) { group = it }
                     tab == 0 && songs.isEmpty() -> EmptyLibrary { reloads++ }
-                    tab == 0 -> list(shown, if (q.isEmpty()) "Brani" else "Ricerca")
+                    tab == 0 -> list(shown, if (q.isEmpty()) "Brani" else "Ricerca", null)
                     tab == 1 -> AlbumGrid(shown.groupBy { it.album }) { group = it }
                     else -> ArtistList(shown.groupBy { it.artist }) { group = it }
                 }
@@ -408,10 +456,11 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
 
     editing?.let { s ->
         val mp3 = remember(s.id) { ctx.contentResolver.getType(s.uri) == "audio/mpeg" }
-        EditDialog(s, mp3, onDismiss = { editing = null }, onWriteFile = { t, a, al -> editing = null; requestWrite(TagWrite(s, t, a, al)) }) { t, a, al ->
+        EditDialog(s, mp3, prefs.lyrics(s.id), onDismiss = { editing = null }, onWriteFile = { w -> editing = null; requestWrite(w) }) { t, a, al ->
             prefs.saveEdit(s.id, t, a, al); editing = null
         }
     }
+    info?.let { s -> InfoDialog(s) { info = null } }
     update?.let { b ->
         AlertDialog(
             onDismissRequest = { update = null },
@@ -441,8 +490,8 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int) {
 @Composable
 private fun SongList(
     songs: List<Song>, name: String, player: Player, prefs: Prefs,
-    onEdit: (Song) -> Unit, onDelete: (Song) -> Unit, onAddToPlaylist: (Song) -> Unit, onRemoveFromPlaylist: ((Song) -> Unit)? = null,
-    fastScroll: Boolean = false,
+    onEdit: (Song) -> Unit, onDelete: (Song) -> Unit, onAddToPlaylist: (Song) -> Unit, onInfo: (Song) -> Unit, onRemoveFromPlaylist: ((Song) -> Unit)? = null,
+    fastScroll: Boolean = false, header: (@Composable () -> Unit)? = null,
 ) {
     if (songs.isEmpty()) return Center("Nessun brano")
     val ctx = LocalContext.current
@@ -450,6 +499,7 @@ private fun SongList(
     val scroller = fastScroll && songs.size >= 15
     Box(Modifier.fillMaxSize()) {
     LazyColumn(Modifier.fillMaxSize(), state, contentPadding = PaddingValues(bottom = 8.dp, end = if (scroller) 18.dp else 0.dp)) {
+        if (header != null) item("header") { header() }
         itemsIndexed(songs, key = { i, s -> "${s.id}-$i" }) { _, s ->
             val isCurrent = s.id == player.current?.id
             val fav = s.id in prefs.favorites
@@ -475,6 +525,9 @@ private fun SongList(
                                 item("Aggiungi a playlist", IcLibrary) { onAddToPlaylist(s) }
                                 if (onRemoveFromPlaylist != null) item("Rimuovi dalla playlist", Icons.Default.Close) { onRemoveFromPlaylist(s) }
                                 item("Modifica", Icons.Default.Edit) { onEdit(s) }
+                                item("Condividi", Icons.Default.Share) { share(ctx, s) }
+                                item("Imposta come suoneria", Icons.Default.Phone) { setRingtone(ctx, s) }
+                                item("Info file", Icons.Default.Info) { onInfo(s) }
                                 item("Elimina dal dispositivo", Icons.Default.Delete) { onDelete(s) }
                             }
                         }
@@ -700,6 +753,8 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
     var menu by remember { mutableStateOf(false) }
     var sleepDialog by remember { mutableStateOf(false) }
     var speedDialog by remember { mutableStateOf(false) }
+    var swipe by remember { mutableFloatStateOf(0f) }
+    val thr = LocalDensity.current.run { 64.dp.toPx() }
     val fav = song.id in prefs.favorites
     val micOk = ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> if (ok) { prefs.visualizer = true; player.setVisualizer(true) } }
@@ -730,7 +785,7 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
                             IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
                             DropdownMenu(menu, { menu = false }) {
                                 val left = player.sleepEndsAt?.let { ((it - System.currentTimeMillis()) / 60_000 + 1).coerceAtLeast(1) }
-                                DropdownMenuItem({ Text(if (left != null) "Timer: $left min" else "Timer di spegnimento") }, { menu = false; sleepDialog = true }, leadingIcon = { Icon(IcTimer, null) })
+                                DropdownMenuItem({ Text(when { player.sleepAtEnd -> "Timer: a fine brano"; left != null -> "Timer: $left min"; else -> "Timer di spegnimento" }) }, { menu = false; sleepDialog = true }, leadingIcon = { Icon(IcTimer, null) })
                                 DropdownMenuItem({ Text("Velocità: ${speedLabel(prefs.speed)}") }, { menu = false; speedDialog = true }, leadingIcon = { Icon(IcSpeed, null) })
                                 DropdownMenuItem({ Text("Equalizzatore") }, { menu = false; showEq = true }, leadingIcon = { Icon(IcEqualizer, null) })
                                 DropdownMenuItem({ Text(if (prefs.visualizer) "Nascondi visualizzatore" else "Visualizzatore") }, {
@@ -751,7 +806,19 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
             val visual: @Composable (Modifier) -> Unit = { m ->
                 Box(m, contentAlignment = Alignment.Center) {
                     if (showLyrics) Lyrics(song, player, prefs, Modifier.fillMaxSize())
-                    else ArtImage(art, Modifier.aspectRatio(1f).shadow(16.dp, RoundedCornerShape(20.dp)).clickable { showLyrics = true }, radius = 20.dp)
+                    else ArtImage(
+                        art,
+                        Modifier.aspectRatio(1f).shadow(16.dp, RoundedCornerShape(20.dp))
+                            // Gesti sulla copertina: tocco = testo, doppio tocco = preferito, scorrimento laterale = cambia brano.
+                            .pointerInput(song.id) { detectTapGestures(onTap = { showLyrics = true }, onDoubleTap = { haptic(); prefs.toggleFavorite(song.id) }) }
+                            .pointerInput(Unit) {
+                                detectHorizontalDragGestures(onDragEnd = {
+                                    when { swipe > thr -> { haptic(); player.prev() }; swipe < -thr -> { haptic(); player.next() } }
+                                    swipe = 0f
+                                }) { change, d -> change.consume(); swipe += d }
+                            },
+                        radius = 20.dp,
+                    )
                 }
             }
             val controls: @Composable () -> Unit = {
@@ -794,6 +861,8 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
                     ListItem(headlineContent = { Text(m?.let { "$it minuti" } ?: "Spento") }, colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                              modifier = Modifier.clickable { player.setSleep(m); sleepDialog = false })
                 }
+                ListItem(headlineContent = { Text("A fine brano") }, colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                         modifier = Modifier.clickable { player.stopAtEnd(true); sleepDialog = false })
             }
         },
         confirmButton = { TextButton({ sleepDialog = false }) { Text("Chiudi") } },
@@ -1021,7 +1090,7 @@ private fun SettingsScreen(prefs: Prefs, onReload: () -> Unit) {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Section("Aspetto")
-        Choice("Tema", listOf("system" to "Sistema", "light" to "Chiaro", "dark" to "Scuro"), prefs.theme) { prefs.theme = it }
+        Choice("Tema", listOf("system" to "Sistema", "light" to "Chiaro", "dark" to "Scuro", "amoled" to "Nero"), prefs.theme) { prefs.theme = it }
         if (Build.VERSION.SDK_INT >= 31) Toggle("Colori dinamici (Material You)", prefs.dynamic) { prefs.dynamic = it }
         if (!prefs.dynamic || Build.VERSION.SDK_INT < 31) {
             Text("Colore accento", style = MaterialTheme.typography.labelLarge)
@@ -1075,7 +1144,7 @@ private fun SettingsScreen(prefs: Prefs, onReload: () -> Unit) {
             }
         }
         Section("Info")
-        Text("Musica 1.6 (build ${localBuild(ctx)}) · Gli aggiornamenti vengono cercati su GitHub a ogni avvio. Testi: tag del file o lrclib.net.", style = MaterialTheme.typography.bodySmall)
+        Text("Musica ${localVersion(ctx)} (build ${localBuild(ctx)}) · Gli aggiornamenti vengono cercati su GitHub a ogni avvio. Testi: tag del file o lrclib.net.", style = MaterialTheme.typography.bodySmall)
         val scope = rememberCoroutineScope()
         OutlinedButton({
             scope.launch {
@@ -1092,31 +1161,104 @@ private fun SettingsScreen(prefs: Prefs, onReload: () -> Unit) {
     }
 }
 
-private data class TagWrite(val song: Song, val title: String, val artist: String, val album: String)
+private data class TagWrite(
+    val song: Song, val title: String, val artist: String, val album: String,
+    val genre: String = "", val year: String = "", val track: String = "", val lyrics: String? = null, val cover: ByteArray? = null,
+)
 
 @Composable
-private fun EditDialog(song: Song, canWriteFile: Boolean, onDismiss: () -> Unit, onWriteFile: (String, String, String) -> Unit, onSave: (String?, String?, String?) -> Unit) {
+private fun EditDialog(song: Song, canWriteFile: Boolean, lyrics: String?, onDismiss: () -> Unit, onWriteFile: (TagWrite) -> Unit, onSave: (String?, String?, String?) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var t by remember { mutableStateOf(song.title) }
     var a by remember { mutableStateOf(song.artist) }
     var al by remember { mutableStateOf(song.album) }
+    var genre by remember { mutableStateOf(song.genre) }
+    var year by remember { mutableStateOf(song.year.takeIf { it > 0 }?.toString().orEmpty()) }
+    var track by remember { mutableStateOf((song.track % 1000).takeIf { it > 0 }?.toString().orEmpty()) }
+    var cover by remember { mutableStateOf<ByteArray?>(null) }
+    var withLyrics by remember { mutableStateOf(false) }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) scope.launch {
+            cover = withContext(Dispatchers.IO) { loadCover(ctx, uri) }
+            if (cover == null) Toast.makeText(ctx, "Immagine non leggibile", Toast.LENGTH_SHORT).show()
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Modifica brano") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(t, { t = it }, label = { Text("Titolo") }, singleLine = true)
                 OutlinedTextField(a, { a = it }, label = { Text("Artista") }, singleLine = true)
                 OutlinedTextField(al, { al = it }, label = { Text("Album") }, singleLine = true)
                 TextButton({ onSave(null, null, null) }) { Text("Ripristina originale") }
                 if (canWriteFile) {
-                    Text("\"Salva\" tiene la modifica solo in questa app. \"Scrivi nel file\" aggiorna i tag ID3 del file MP3, visibili anche alle altre app.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton({ onWriteFile(t.trim(), a.trim(), al.trim()) }, enabled = t.isNotBlank()) { Text("Scrivi nel file MP3") }
+                    Text("\"Salva\" tiene titolo, artista e album solo in questa app. \"Scrivi nel file\" aggiorna i tag ID3 del file MP3 con tutti i campi qui sotto, visibili anche alle altre app.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OutlinedTextField(genre, { genre = it }, label = { Text("Genere") }, singleLine = true)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(year, { year = it.filter(Char::isDigit).take(4) }, Modifier.weight(1f), label = { Text("Anno") }, singleLine = true)
+                        OutlinedTextField(track, { track = it.filter(Char::isDigit).take(3) }, Modifier.weight(1f), label = { Text("Traccia") }, singleLine = true)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val bmp = remember(cover) { cover?.let { BitmapFactory.decodeByteArray(it, 0, it.size) } }
+                        if (bmp != null) ArtImage(bmp, Modifier.size(48.dp), radius = 8.dp)
+                        TextButton({ pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }) { Text(if (cover == null) "Scegli copertina" else "Cambia copertina") }
+                        if (cover != null) TextButton({ cover = null }) { Text("Togli") }
+                    }
+                    if (lyrics != null) Toggle("Scrivi anche il testo nel file", withLyrics) { withLyrics = it }
+                    TextButton({ onWriteFile(TagWrite(song, t.trim(), a.trim(), al.trim(), genre.trim(), year, track, lyrics.takeIf { withLyrics }, cover)) }, enabled = t.isNotBlank()) { Text("Scrivi nel file MP3") }
                 }
             }
         },
         confirmButton = { TextButton({ onSave(t.trim(), a.trim(), al.trim()) }, enabled = t.isNotBlank()) { Text("Salva") } },
         dismissButton = { TextButton(onDismiss) { Text("Annulla") } },
     )
+}
+
+@Composable
+private fun InfoDialog(song: Song, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val rows by produceState(emptyList<Pair<String, String>>(), song.id) { value = withContext(Dispatchers.IO) { fileInfo(ctx, song) } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Info file") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                rows.forEach { (k, v) ->
+                    Column {
+                        Text(k, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Text(v, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("Chiudi") } },
+    )
+}
+
+/** Testata di album o artista: copertina grande, dati e tasti Riproduci / Casuale. */
+@Composable
+private fun GroupHeader(songs: List<Song>, title: String, isAlbum: Boolean, player: Player, prefs: Prefs) {
+    if (songs.isEmpty()) return
+    val total = songs.sumOf { it.duration }
+    val h = total / 3_600_000; val m = total / 60_000 % 60
+    val durata = when { h > 0 -> "$h h $m min"; m > 0 -> "$m min"; else -> "${total / 1000} s" }
+    val year = songs.maxOf { it.year }
+    val sub = if (isAlbum) listOfNotNull(songs[0].artist, year.takeIf { it > 0 }?.toString(), brani(songs.size), durata).joinToString(" · ")
+              else "${songs.map { it.album }.distinct().size} album · ${brani(songs.size)} · $durata"
+    Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (isAlbum) AlbumArt(songs[0], Modifier.size(180.dp).shadow(12.dp, RoundedCornerShape(20.dp)), radius = 20.dp)
+        else Box(Modifier.size(140.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+            Text(title.firstOrNull()?.uppercase() ?: "?", style = MaterialTheme.typography.displayMedium, color = MaterialTheme.colorScheme.onPrimaryContainer)
+        }
+        Text(title, Modifier.padding(top = 12.dp), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(sub, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+        Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button({ player.play(songs, songs[0], title) }) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text("Riproduci") }
+            OutlinedButton({ prefs.shuffle = true; player.play(songs, songs.random(), title) }) { Icon(IcShuffle, null); Spacer(Modifier.width(6.dp)); Text("Casuale") }
+        }
+    }
 }
 
 @Composable
@@ -1173,7 +1315,33 @@ private fun Choice(label: String, options: List<Pair<String, String>>, value: St
 private fun fmt(ms: Long) = "%d:%02d".format(ms / 60000, ms / 1000 % 60)
 @Suppress("DEPRECATION")
 private fun localBuild(ctx: Context): Int = ctx.packageManager.getPackageInfo(ctx.packageName, 0).let { if (Build.VERSION.SDK_INT >= 28) it.longVersionCode.toInt() else it.versionCode }
+private fun localVersion(ctx: Context): String = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
 private fun brani(n: Int) = if (n == 1) "1 brano" else "$n brani"
+
+private fun share(ctx: Context, s: Song) = ctx.startActivity(Intent.createChooser(
+    Intent(Intent.ACTION_SEND).setType(ctx.contentResolver.getType(s.uri) ?: "audio/*").putExtra(Intent.EXTRA_STREAM, s.uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+    "Condividi brano",
+))
+
+/** Serve il permesso "Modifica impostazioni di sistema": la prima volta apre la schermata di sistema per concederlo. */
+private fun setRingtone(ctx: Context, s: Song) {
+    if (!Settings.System.canWrite(ctx)) {
+        Toast.makeText(ctx, "Consenti a Musica di modificare le impostazioni, poi riprova", Toast.LENGTH_LONG).show()
+        ctx.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${ctx.packageName}")))
+        return
+    }
+    runCatching { RingtoneManager.setActualDefaultRingtoneUri(ctx, RingtoneManager.TYPE_RINGTONE, s.uri) }
+        .onSuccess { Toast.makeText(ctx, "Suoneria impostata: ${s.title}", Toast.LENGTH_SHORT).show() }
+        .onFailure { Toast.makeText(ctx, "Non riuscito: ${it.message}", Toast.LENGTH_LONG).show() }
+}
+
+/** Immagine scelta dalla galleria → JPEG di al più 1000 px per il frame APIC. */
+private fun loadCover(ctx: Context, uri: Uri): ByteArray? = runCatching {
+    val src = ctx.contentResolver.openInputStream(uri)!!.use { BitmapFactory.decodeStream(it) } ?: return null
+    val k = 1000f / maxOf(src.width, src.height)
+    val b = if (k < 1) Bitmap.createScaledBitmap(src, (src.width * k).toInt(), (src.height * k).toInt(), true) else src
+    java.io.ByteArrayOutputStream().also { b.compress(Bitmap.CompressFormat.JPEG, 88, it) }.toByteArray()
+}.getOrNull()
 private fun speedLabel(s: Float) = if (s == s.toLong().toFloat()) "${s.toLong()}×" else "$s×"
 
 // Icone Material non incluse in icons-core, ricostruite dal path (evita la dipendenza icons-extended).

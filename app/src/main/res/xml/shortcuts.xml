@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Scorciatoie tenendo premuta l'icona dell'app. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="shuffle"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_shuffle"
+        android:shortcutShortLabel="@string/shortcut_shuffle">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.example.mp3"
+            android:targetClass="com.example.mp3.MainActivity">
+            <extra android:name="shortcut" android:value="shuffle" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="fav"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_fav"
+        android:shortcutShortLabel="@string/shortcut_fav">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.example.mp3"
+            android:targetClass="com.example.mp3.MainActivity">
+            <extra android:name="shortcut" android:value="fav" />
+        </intent>
+    </shortcut>
+</shortcuts>

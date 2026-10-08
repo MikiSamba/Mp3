@@ -54,6 +54,8 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     /** False finché non parte la prima riproduzione: dopo "riprendi dove eri" il brano è caricato ma la notifica non compare. */
     var started = false; private set
     var sleepEndsAt: Long? by mutableStateOf(null); private set
+    /** Timer "a fine brano": finito questo, il prossimo viene caricato in pausa. */
+    var sleepAtEnd by mutableStateOf(false); private set
     /** 32 barre 0..1 dallo spettro audio, quando il visualizzatore è attivo. */
     var spectrum: FloatArray by mutableStateOf(FloatArray(0)); private set
     val position: Int get() = if (current == null) 0 else mp.currentPosition.toInt()
@@ -115,7 +117,7 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         val keep = planned?.takeIf { k == planKey && prefs.shuffle && upNext.isEmpty() && it.id != cur.id && queue.any { q -> q.id == it.id } }
         planKey = k
         val next = keep ?: peekNext(auto = true)
-        val queued = next != null && prefs.crossfade == 0
+        val queued = next != null && prefs.crossfade == 0 && !sleepAtEnd
         if (next?.id == planned?.id && (mp.mediaItemCount > 1) == queued) return
         planned = next
         if (mp.mediaItemCount > 1) mp.removeMediaItems(1, mp.mediaItemCount)
@@ -176,9 +178,27 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     fun next(auto: Boolean = false) {
         endFade()
         if (planKey != key) plan()
+        if (auto && sleepAtEnd) { // timer a fine brano: prossimo pronto ma in pausa
+            sleepAtEnd = false
+            val s = planned ?: peekNext(true)
+            if (s != null) { advance(s); load(s) } else playing = false
+            onChange()
+            return
+        }
         val s = planned ?: peekNext(auto) ?: run { playing = false; onChange(); return }
         advance(s)
         start(s)
+    }
+
+    /** Carica [song] in pausa (ripresa all'avvio, timer a fine brano). */
+    private fun load(song: Song, pos: Long = 0) {
+        mp.setMediaItem(item(song), pos)
+        mp.prepare()
+        mp.playWhenReady = false
+        current = song
+        playing = false
+        planned = null
+        plan()
     }
 
     fun prev() {
@@ -210,7 +230,9 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         handler.removeCallbacks(sleep)
         sleepEndsAt = minutes?.let { System.currentTimeMillis() + it * 60_000L }
         if (minutes != null) handler.postDelayed(sleep, minutes * 60_000L)
+        if (sleepAtEnd) { sleepAtEnd = false; plan() }
     }
+    fun stopAtEnd(on: Boolean) { setSleep(null); sleepAtEnd = on; plan() }
     private val sleep = Runnable { pause(); sleepEndsAt = null }
 
     // Ogni 250 ms mentre suona: ripianifica se cambiano casuale/ripeti/dissolvenza, avvia la dissolvenza quando mancano prefs.crossfade secondi.
@@ -226,7 +248,7 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
 
     private fun maybeCrossfade() {
         val ms = prefs.crossfade * 1000
-        if (ms <= 0 || fadingOut != null || current == null) return
+        if (ms <= 0 || fadingOut != null || current == null || sleepAtEnd) return
         val dur = mp.duration
         if (dur <= 0 || dur - mp.currentPosition > ms) return
         val song = planned ?: return
@@ -317,11 +339,7 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         upNext = ids(s.optJSONArray("upNext")).mapNotNull { byId[it] }
         queueName = s.optString("name")
         ctxId = song.id
-        mp.setMediaItem(item(song), s.optLong("pos"))
-        mp.prepare()
-        current = song
-        planned = null
-        plan()
+        load(song, s.optLong("pos"))
         onChange()
     }
 

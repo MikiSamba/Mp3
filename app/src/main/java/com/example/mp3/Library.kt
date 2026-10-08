@@ -5,6 +5,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -23,6 +24,7 @@ import kotlin.reflect.KProperty
 data class Song(
     val id: Long, val uri: Uri, val title: String, val artist: String, val album: String,
     val albumId: Long, val duration: Long, val track: Int, val dateAdded: Long,
+    val year: Int = 0, val genre: String = "",
 )
 
 fun ContentResolver.loadSongs(): List<Song> {
@@ -30,8 +32,8 @@ fun ContentResolver.loadSongs(): List<Song> {
     val cols = arrayOf(
         MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST,
         MediaStore.Audio.Media.ALBUM, MediaStore.Audio.Media.ALBUM_ID, MediaStore.Audio.Media.DURATION,
-        MediaStore.Audio.Media.TRACK, MediaStore.Audio.Media.DATE_ADDED,
-    )
+        MediaStore.Audio.Media.TRACK, MediaStore.Audio.Media.DATE_ADDED, MediaStore.Audio.Media.YEAR,
+    ) + if (Build.VERSION.SDK_INT >= 30) arrayOf(MediaStore.Audio.Media.GENRE) else emptyArray() // colonna GENRE solo da Android 11
     val out = mutableListOf<Song>()
     runCatching {
         query(base, cols, "${MediaStore.Audio.Media.IS_MUSIC} != 0", null, null)?.use { c ->
@@ -42,6 +44,7 @@ fun ContentResolver.loadSongs(): List<Song> {
                 artist = c.getString(2).let { if (it == null || it == MediaStore.UNKNOWN_STRING) "Artista sconosciuto" else it },
                 album = c.getString(3).let { if (it == null || it == MediaStore.UNKNOWN_STRING) "Album sconosciuto" else it },
                 albumId = c.getLong(4), duration = c.getLong(5), track = c.getInt(6), dateAdded = c.getLong(7),
+                year = c.getInt(8), genre = if (c.columnCount > 9) c.getString(9).orEmpty() else "",
             )
         }
     }
@@ -55,6 +58,35 @@ private val artCache = object : LruCache<Long, Bitmap>(32 * 1024 * 1024) {
 private val artMiss = ConcurrentHashMap.newKeySet<Long>()
 
 fun cachedArt(song: Song): Bitmap? = artCache.get(song.albumId)
+
+/** Dopo aver scritto una nuova copertina nel file. */
+fun invalidateArt(albumId: Long) { artCache.remove(albumId); artMiss.remove(albumId) }
+
+/** Dati tecnici del file per la finestra "Info file". */
+fun fileInfo(ctx: Context, s: Song): List<Pair<String, String>> {
+    val rows = mutableListOf("Titolo" to s.title, "Artista" to s.artist, "Album" to s.album)
+    if (s.genre.isNotBlank()) rows += "Genere" to s.genre
+    if (s.year > 0) rows += "Anno" to s.year.toString()
+    if (s.track % 1000 > 0) rows += "Traccia" to (s.track % 1000).toString() // MediaStore: disco*1000 + numero
+    rows += "Durata" to "%d:%02d".format(s.duration / 60000, s.duration / 1000 % 60)
+    val r = MediaMetadataRetriever()
+    runCatching {
+        r.setDataSource(ctx, s.uri)
+        r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toIntOrNull()?.let { rows += "Bitrate" to "${it / 1000} kbps" }
+        if (Build.VERSION.SDK_INT >= 31) r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)?.toIntOrNull()?.let { rows += "Campionamento" to "${it / 1000f} kHz".replace(".0 ", " ") }
+    }
+    r.release()
+    runCatching {
+        ctx.contentResolver.query(s.uri, arrayOf(MediaStore.Audio.Media.MIME_TYPE, MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.DATA), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                c.getString(0)?.let { rows += "Formato" to it }
+                rows += "Dimensione" to "%.1f MB".format(c.getLong(1) / 1_048_576.0)
+                c.getString(2)?.let { rows += "Percorso" to it }
+            }
+        }
+    }
+    return rows
+}
 
 fun ContentResolver.albumArt(song: Song): Bitmap? {
     artCache.get(song.albumId)?.let { return it }
