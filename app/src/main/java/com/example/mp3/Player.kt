@@ -1,10 +1,11 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.example.mp3
 
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
 import android.media.audiofx.Visualizer
@@ -16,6 +17,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player as Exo
+import androidx.media3.exoplayer.ExoPlayer
 import org.json.JSONArray
 import kotlin.math.hypot
 import kotlin.math.sqrt
@@ -23,20 +29,21 @@ import kotlin.math.sqrt
 /**
  * Coda in stile Spotify: [upNext] (brani aggiunti a mano) ha la precedenza, poi si continua con il contesto
  * [queue] (album/lista avviata) dall'ultimo brano di contesto riprodotto. Avviare un nuovo contesto non svuota [upNext].
- * Dissolvenza incrociata: un secondo MediaPlayer sulla stessa sessione audio (così equalizzatore e visualizzatore valgono per entrambi).
+ * Motore ExoPlayer (Media3): il prossimo brano ([planned]) è già accodato nel player, così il passaggio è senza pausa.
+ * Dissolvenza incrociata: un secondo ExoPlayer sulla stessa sessione audio (equalizzatore e visualizzatore valgono per entrambi).
  */
 class Player(private val ctx: Context, private val prefs: Prefs) {
-    private val audioAttrs = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
     private val handler = Handler(Looper.getMainLooper())
     private val am = ctx.getSystemService(AudioManager::class.java)
+    private val audioAttrs = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build()
 
-    private var mp: MediaPlayer = newPlayer(null)
-    val sessionId: Int = mp.audioSessionId
-    private var fadingOut: MediaPlayer? = null
+    val sessionId: Int = androidx.media3.common.util.Util.generateAudioSessionIdV21(ctx)
+    private var mp: ExoPlayer = newPlayer()
+    private var fadingOut: ExoPlayer? = null
     val effects = Effects(sessionId, prefs)
     private var visualizer: Visualizer? = null
 
-    /** Chiamato a ogni cambio di stato: il servizio aggiorna MediaSession e notifica. */
+    /** Chiamato a ogni cambio di stato: il servizio aggiorna sessione multimediale, notifica e widget. */
     var onChange: () -> Unit = {}
 
     var queue: List<Song> by mutableStateOf(emptyList()); private set
@@ -44,10 +51,12 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     var upNext: List<Song> by mutableStateOf(emptyList()); private set
     var current: Song? by mutableStateOf(null); private set
     var playing by mutableStateOf(false); private set
+    /** False finché non parte la prima riproduzione: dopo "riprendi dove eri" il brano è caricato ma la notifica non compare. */
+    var started = false; private set
     var sleepEndsAt: Long? by mutableStateOf(null); private set
     /** 32 barre 0..1 dallo spettro audio, quando il visualizzatore è attivo. */
     var spectrum: FloatArray by mutableStateOf(FloatArray(0)); private set
-    val position: Int get() = if (current == null) 0 else mp.currentPosition
+    val position: Int get() = if (current == null) 0 else mp.currentPosition.toInt()
 
     private var ctxId: Long? = null // ultimo brano di contesto riprodotto (i brani di upNext non lo spostano)
     private val ctxPos get() = queue.indexOfFirst { it.id == ctxId }
@@ -55,10 +64,62 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     /** Brani di contesto che seguono quello corrente. */
     val nextInContext: List<Song> get() = queue.drop(ctxPos + 1)
 
-    private fun newPlayer(session: Int?): MediaPlayer = MediaPlayer().apply {
-        if (session != null) audioSessionId = session
-        setAudioAttributes(audioAttrs)
-        setOnCompletionListener { p -> if (p === mp) next(auto = true) }
+    /** Prossimo brano deciso (null a fine coda senza "ripeti") e impostazioni con cui è stato deciso. */
+    private var planned: Song? = null
+    private var planKey: Triple<Boolean, Boolean, Int>? = null
+    private val key get() = Triple(prefs.shuffle, prefs.repeat, prefs.crossfade)
+    /** Per la sessione multimediale: precedente nel contesto e prossimo (a fine coda ricomincia, come il tasto "successivo"). */
+    val prevSong: Song? get() = if (queue.isEmpty()) null else queue[(ctxPos - 1).mod(queue.size)]
+    val nextSong: Song? get() = planned ?: peekNext(auto = false)
+
+    private fun newPlayer(): ExoPlayer {
+        val p = ExoPlayer.Builder(ctx).build()
+        p.setAudioAttributes(androidx.media3.common.AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), false)
+        p.audioSessionId = sessionId
+        p.setHandleAudioBecomingNoisy(true) // cuffie scollegate → pausa
+        p.setPlaybackSpeed(prefs.speed)
+        p.addListener(object : Exo.Listener {
+            override fun onMediaItemTransition(item: MediaItem?, reason: Int) { // passaggio senza pausa al brano pre-accodato
+                val s = planned ?: return
+                if (p !== mp || reason != Exo.MEDIA_ITEM_TRANSITION_REASON_AUTO) return
+                p.removeMediaItems(0, p.currentMediaItemIndex)
+                advance(s)
+                current = s
+                planned = null
+                plan()
+                prefs.addRecent(s.id)
+                onChange()
+            }
+            override fun onPlaybackStateChanged(state: Int) { if (p === mp && state == Exo.STATE_ENDED) next(auto = true) }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (p === mp && !playWhenReady && playing) { playing = false; onChange() }
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                if (p !== mp) return
+                if (!started) { stop(); return } // file dell'ultima sessione sparito: niente avviso
+                Toast.makeText(ctx, "Impossibile riprodurre: ${current?.title}", Toast.LENGTH_SHORT).show()
+                playing = false
+                onChange()
+            }
+        })
+        return p
+    }
+
+    private fun item(s: Song) = MediaItem.Builder().setUri(s.uri).setMediaId(s.id.toString()).build()
+
+    /** Sceglie il prossimo brano e, senza dissolvenza, lo accoda nel player per il passaggio senza pausa. */
+    private fun plan() {
+        val k = key
+        val cur = current ?: run { planned = null; planKey = k; return }
+        // in casuale la scelta già fatta resta valida finché coda e impostazioni non cambiano
+        val keep = planned?.takeIf { k == planKey && prefs.shuffle && upNext.isEmpty() && it.id != cur.id && queue.any { q -> q.id == it.id } }
+        planKey = k
+        val next = keep ?: peekNext(auto = true)
+        val queued = next != null && prefs.crossfade == 0
+        if (next?.id == planned?.id && (mp.mediaItemCount > 1) == queued) return
+        planned = next
+        if (mp.mediaItemCount > 1) mp.removeMediaItems(1, mp.mediaItemCount)
+        if (queued) mp.addMediaItem(item(next!!))
     }
 
     fun play(list: List<Song>, song: Song, name: String) {
@@ -68,12 +129,12 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         start(song)
     }
 
-    fun enqueue(song: Song) { upNext = upNext + song }
-    fun playNext(song: Song) { upNext = listOf(song) + upNext }
-    fun removeUpNext(i: Int) { upNext = upNext.filterIndexed { j, _ -> j != i } }
-    fun moveUpNext(from: Int, to: Int) { val l = upNext.toMutableList(); l.add(to, l.removeAt(from)); upNext = l }
-    fun clearUpNext() { upNext = emptyList() }
-    fun playUpNext(i: Int) { val s = upNext[i]; removeUpNext(i); start(s) }
+    fun enqueue(song: Song) { upNext = upNext + song; plan() }
+    fun playNext(song: Song) { upNext = listOf(song) + upNext; plan() }
+    fun removeUpNext(i: Int) { upNext = upNext.filterIndexed { j, _ -> j != i }; plan() }
+    fun moveUpNext(from: Int, to: Int) { val l = upNext.toMutableList(); l.add(to, l.removeAt(from)); upNext = l; plan() }
+    fun clearUpNext() { upNext = emptyList(); plan() }
+    fun playUpNext(i: Int) { val s = upNext[i]; upNext = upNext.filterIndexed { j, _ -> j != i }; start(s) }
     fun playInContext(song: Song) { ctxId = song.id; start(song) }
 
     fun toggle() { if (playing) pause() else resume() }
@@ -81,16 +142,17 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     fun pause() {
         if (!playing) return
         endFade()
-        mp.pause()
         playing = false
+        mp.pause()
         onChange()
     }
 
     fun resume() {
         if (current == null || playing || !requestFocus()) return
-        mp.start()
-        applySpeed()
+        when (mp.playbackState) { Exo.STATE_IDLE -> mp.prepare(); Exo.STATE_ENDED -> mp.seekTo(0) } // dopo un errore / a fine coda
+        started = true
         playing = true
+        mp.play()
         schedule()
         onChange()
     }
@@ -113,7 +175,8 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
 
     fun next(auto: Boolean = false) {
         endFade()
-        val s = peekNext(auto) ?: run { playing = false; onChange(); return }
+        if (planKey != key) plan()
+        val s = planned ?: peekNext(auto) ?: run { playing = false; onChange(); return }
         advance(s)
         start(s)
     }
@@ -121,25 +184,26 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     fun prev() {
         if (current == null) return
         endFade()
-        if (mp.currentPosition > 3000 || queue.isEmpty()) { mp.seekTo(0); onChange(); return }
-        playInContext(queue[(ctxPos - 1).mod(queue.size)])
+        val p = prevSong
+        if (mp.currentPosition > 3000 || p == null) { mp.seekTo(0); onChange(); return }
+        playInContext(p)
     }
 
-    fun seekTo(ms: Int) { if (current != null) { endFade(); mp.seekTo(ms); onChange() } }
+    fun seekTo(ms: Int) { if (current != null) { endFade(); mp.seekTo(ms.toLong()); onChange() } }
 
     fun stop() {
         endFade()
         abandonFocus()
-        mp.reset()
+        mp.stop()
+        mp.clearMediaItems()
         current = null
+        planned = null
         playing = false
+        started = false
         onChange()
     }
 
-    fun setSpeed(s: Float) { prefs.speed = s; applySpeed() }
-
-    // Impostare playbackParams avvia la riproduzione, quindi solo mentre sta suonando.
-    private fun applySpeed() { if (playing) runCatching { mp.playbackParams = mp.playbackParams.setSpeed(prefs.speed) } }
+    fun setSpeed(s: Float) { prefs.speed = s; mp.setPlaybackSpeed(s) }
 
     /** Timer di spegnimento: mette in pausa dopo [minutes]; null lo annulla. */
     fun setSleep(minutes: Int?) {
@@ -149,49 +213,57 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     }
     private val sleep = Runnable { pause(); sleepEndsAt = null }
 
-    // Ogni 250 ms mentre suona: avvia la dissolvenza incrociata quando mancano prefs.crossfade secondi alla fine.
+    // Ogni 250 ms mentre suona: ripianifica se cambiano casuale/ripeti/dissolvenza, avvia la dissolvenza quando mancano prefs.crossfade secondi.
     private val tick = object : Runnable {
-        override fun run() { if (playing) { maybeCrossfade(); handler.postDelayed(this, 250) } }
+        override fun run() {
+            if (!playing) return
+            if (planKey != key) plan()
+            maybeCrossfade()
+            handler.postDelayed(this, 250)
+        }
     }
     private fun schedule() { handler.removeCallbacks(tick); handler.postDelayed(tick, 250) }
 
     private fun maybeCrossfade() {
         val ms = prefs.crossfade * 1000
         if (ms <= 0 || fadingOut != null || current == null) return
-        val dur = runCatching { mp.duration }.getOrDefault(0)
+        val dur = mp.duration
         if (dur <= 0 || dur - mp.currentPosition > ms) return
-        val song = peekNext(auto = true) ?: return
-        val np = newPlayer(sessionId)
-        if (runCatching { np.setDataSource(ctx, song.uri); np.prepare() }.isFailure) { np.release(); return }
+        val song = planned ?: return
+        val np = newPlayer()
+        np.setMediaItem(item(song))
+        np.prepare()
+        np.volume = 0f
+        np.play()
         val old = mp
-        old.setOnCompletionListener(null)
-        np.setVolume(0f, 0f)
-        np.start()
         mp = np
         fadingOut = old
         advance(song)
         current = song
+        planned = null
+        plan()
         prefs.addRecent(song.id)
-        applySpeed()
         onChange()
         val steps = 25
         val stepMs = (ms / steps).toLong()
         var i = 0
         val fade = object : Runnable {
             override fun run() {
+                if (fadingOut !== old) return
                 i++
                 val t = i / steps.toFloat()
-                runCatching { old.setVolume(1 - t, 1 - t); np.setVolume(t, t) }
-                if (i < steps && fadingOut === old) handler.postDelayed(this, stepMs) else if (fadingOut === old) endFade()
+                old.volume = 1 - t
+                np.volume = t
+                if (i < steps) handler.postDelayed(this, stepMs) else endFade()
             }
         }
         handler.postDelayed(fade, stepMs)
     }
 
     private fun endFade() {
-        fadingOut?.let { runCatching { it.stop() }; it.release() }
+        fadingOut?.let { it.stop(); it.release() }
         fadingOut = null
-        runCatching { mp.setVolume(1f, 1f) }
+        mp.volume = 1f
     }
 
     /** Visualizzatore (serve il permesso RECORD_AUDIO): alimenta [spectrum] a circa 10 fps. */
@@ -229,6 +301,7 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         if (current?.id == id) { next(); if (current?.id == id) stop() }
         upNext = upNext.filter { it.id != id }
         queue = queue.filter { it.id != id }
+        plan()
     }
 
     fun saveState() = prefs.saveState(current?.id, position, queue.map { it.id }, upNext.map { it.id }, queueName)
@@ -244,7 +317,12 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         upNext = ids(s.optJSONArray("upNext")).mapNotNull { byId[it] }
         queueName = s.optString("name")
         ctxId = song.id
-        if (runCatching { mp.reset(); mp.audioSessionId = sessionId; mp.setDataSource(ctx, song.uri); mp.prepare(); mp.seekTo(s.optInt("pos")) }.isSuccess) current = song
+        mp.setMediaItem(item(song), s.optLong("pos"))
+        mp.prepare()
+        current = song
+        planned = null
+        plan()
+        onChange()
     }
 
     fun release() {
@@ -259,21 +337,25 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
     private fun start(song: Song) {
         endFade()
         current = song
-        playing = requestFocus() && runCatching { mp.reset(); mp.audioSessionId = sessionId; mp.setDataSource(ctx, song.uri); mp.prepare(); mp.start() }
-            .onFailure { Toast.makeText(ctx, "Impossibile riprodurre: ${song.title}", Toast.LENGTH_SHORT).show() }
-            .isSuccess
-        applySpeed()
+        started = true
+        playing = requestFocus()
+        mp.setMediaItem(item(song))
+        mp.prepare()
+        mp.playWhenReady = playing
+        planned = null
+        plan()
         prefs.addRecent(song.id)
         schedule()
         onChange()
     }
 
-    // Audio focus: pausa per chiamate/altre app, volume ridotto per notifiche vocali, ripresa quando torna il focus.
+    // Audio focus gestito qui e non da ExoPlayer: con due player (dissolvenza) il secondo toglierebbe il focus al primo.
+    // Pausa per chiamate/altre app, volume ridotto per notifiche vocali, ripresa quando torna il focus.
     private var resumeOnGain = false
     private val focusListener = AudioManager.OnAudioFocusChangeListener { f ->
         when (f) {
-            AudioManager.AUDIOFOCUS_GAIN -> { mp.setVolume(1f, 1f); if (resumeOnGain) resume(); resumeOnGain = false }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> mp.setVolume(0.2f, 0.2f)
+            AudioManager.AUDIOFOCUS_GAIN -> { mp.volume = 1f; if (resumeOnGain) resume(); resumeOnGain = false }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> mp.volume = 0.2f
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> { resumeOnGain = playing; pause() }
             else -> { resumeOnGain = false; pause() }
         }
