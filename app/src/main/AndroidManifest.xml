@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
+        android:name=".App"
         android:label="Musica"
         android:icon="@drawable/ic_launcher"
         android:allowBackup="false"

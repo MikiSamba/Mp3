@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -12,13 +13,13 @@ val ks = Properties().apply { rootProject.file("keystore.properties").takeIf { i
 
 android {
     namespace = "com.example.mp3"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.example.mp3"
         minSdk = 24
-        targetSdk = 35
-        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt() ?: 5  // su Actions cresce da solo a ogni build
-        versionName = "1.4"
+        targetSdk = 36
+        versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt() ?: 6  // su Actions cresce da solo a ogni build
+        versionName = "1.5"
     }
     signingConfigs {
         create("release") {
@@ -29,7 +30,12 @@ android {
         }
     }
     buildTypes {
-        release { signingConfig = signingConfigs.getByName("release") }
+        release {
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
         debug { signingConfig = signingConfigs.getByName("release") }
     }
     buildFeatures { compose = true }
@@ -37,12 +43,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 }
 
+kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
+
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    implementation(platform("androidx.compose:compose-bom:2025.06.01"))
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.activity:activity-compose:1.10.1")
     testImplementation("junit:junit:4.13.2")
 }

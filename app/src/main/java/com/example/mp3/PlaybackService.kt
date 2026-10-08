@@ -5,7 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.graphics.Bitmap
 import android.graphics.drawable.Icon
 import android.media.MediaMetadata
@@ -26,6 +30,9 @@ class PlaybackService : Service() {
     private val nm by lazy { getSystemService(NotificationManager::class.java) }
     private var art: Pair<Long, Bitmap?>? = null
     private var foreground = false
+    private val noisy = object : BroadcastReceiver() { // cuffie scollegate → pausa
+        override fun onReceive(c: Context?, i: Intent?) { player.pause() }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -44,6 +51,12 @@ class PlaybackService : Service() {
             isActive = true
         }
         session.setSessionActivity(openApp())
+        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(noisy, filter, RECEIVER_NOT_EXPORTED) else registerReceiver(noisy, filter)
+        Thread { // riprendi dove eri: ricarica in pausa l'ultima sessione
+            val all = contentResolver.loadSongs().map(Prefs.of(this)::applyEdits)
+            android.os.Handler(mainLooper).post { player.restore(all) }
+        }.start()
         if (Build.VERSION.SDK_INT >= 26) {
             nm.deleteNotificationChannel("playback") // canale 1.2 a bassa priorità: alcuni OEM non lo mostrano su lock screen/isola
             nm.createNotificationChannel(NotificationChannel(CHANNEL, "Riproduzione", NotificationManager.IMPORTANCE_DEFAULT).apply {
@@ -73,12 +86,15 @@ class PlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(noisy)
+        player.saveState()
         session.release()
         player.release()
         super.onDestroy()
     }
 
     private fun update() {
+        player.saveState()
         val song = player.current
         if (song == null) {
             stopForeground(STOP_FOREGROUND_REMOVE)
