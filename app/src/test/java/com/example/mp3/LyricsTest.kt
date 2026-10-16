@@ -111,3 +111,16 @@ class TagsTest {
         assertEquals(audio.toList(), out.copyOfRange(out.size - 50, out.size).toList())
     }
 }
+
+class DownloadsTest {
+    @Test fun `archive org search and files parse strings and lists`() {
+        val items = parseSearch("""{"response":{"docs":[{"identifier":"a-b","title":["Titolo lista"],"creator":"Autore","year":"2012"},{"identifier":"c","title":"Solo"}]}}""")
+        assertEquals(listOf("Titolo lista", "Solo"), items.map { it.title })
+        assertEquals("", items[1].creator)
+        val files = parseFiles("""{"files":[{"name":"02 b.mp3","size":"20","source":"original"},{"name":"x.txt","size":"1"},{"name":"QVC1.zip","size":"300"},{"name":"01 a.MP3"},{"name":"img_jp2.zip","source":"derivative"}]}""")
+        assertEquals(listOf("01 a.MP3", "02 b.mp3", "QVC1.zip"), files.map { it.name })
+        assertEquals(0L, files[0].size)
+        assertEquals("https://archive.org/download/a-b/dir/01%20a%26b.mp3", iaUrl("a-b", "dir/01 a&b.mp3"))
+        assertEquals("Vol. 1 8 ok", cleanName("Vol. 1/8:  ok\u0007"))
+    }
+}

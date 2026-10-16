@@ -73,6 +73,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -157,6 +159,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -177,6 +180,7 @@ private val TABS = listOf("Brani", "Album", "Artisti", "Raccolta", "Opzioni")
 private const val FAV = "fav"
 private const val RECENT = "recent"
 private const val PL = "pl:"
+private const val DL = "dl"
 private val SPEEDS = listOf(0.75f, 1f, 1.25f, 1.5f, 2f)
 private val SLEEP = listOf(15, 30, 45, 60, 90)
 
@@ -379,6 +383,7 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
     val shown = remember(songs, q) { songs.filter(::matches) }
     val g = group
     val groupTitle = when {
+        g == DL -> "Scarica"
         g == FAV -> "Preferiti"
         g == RECENT -> "Ascoltati di recente"
         g != null && g.startsWith(PL) -> g.removePrefix(PL)
@@ -406,7 +411,7 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
                     },
                     navigationIcon = { if (group != null) IconButton({ group = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro") } },
                     actions = {
-                        if (tab < 4 && !(tab == 3 && group == null)) IconButton({ query = if (query == null) "" else null }) {
+                        if (tab < 4 && !(tab == 3 && group == null) && group != DL) IconButton({ query = if (query == null) "" else null }) {
                             Icon(if (query == null) Icons.Default.Search else Icons.Default.Close, "Cerca")
                         }
                     },
@@ -433,10 +438,11 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
                 }
                 // Album e artisti aperti hanno la testata con copertina, dati e tasti Riproduci / Casuale.
                 val header: (@Composable () -> Unit)? =
-                    if (g != null && g != FAV && g != RECENT && !g.startsWith(PL)) ({ GroupHeader(groupSongs, groupTitle!!, tab == 1, player, prefs) }) else null
+                    if (g != null && g != FAV && g != RECENT && g != DL && !g.startsWith(PL)) ({ GroupHeader(groupSongs, groupTitle!!, tab == 1, player, prefs) }) else null
                 when {
                     !granted -> NoPermission { ask.launch(perms) }
                     tab == 4 -> SettingsScreen(prefs) { reloads++ }
+                    group == DL -> DownloadScreen()
                     group != null -> list(groupSongs, groupTitle!!, header)
                     tab == 3 -> LibraryScreen(prefs, songs) { group = it }
                     tab == 0 && songs.isEmpty() -> EmptyLibrary { reloads++ }
@@ -629,6 +635,11 @@ private fun LibraryScreen(prefs: Prefs, songs: List<Song>, onOpen: (String) -> U
                 headlineContent = { Text("Ascoltati di recente") }, supportingContent = { Text(brani(prefs.recents.count { it in ids })) },
                 leadingContent = { Icon(IcHistory, null, tint = MaterialTheme.colorScheme.primary) },
                 modifier = Modifier.clickable { onOpen(RECENT) },
+            )
+            ListItem(
+                headlineContent = { Text("Scarica musica") }, supportingContent = { Text("Mixtape e album in free download da Internet Archive, o da un link") },
+                leadingContent = { Icon(IcDownload, null, tint = MaterialTheme.colorScheme.primary) },
+                modifier = Modifier.clickable { onOpen(DL) },
             )
             HorizontalDivider(Modifier.padding(vertical = 8.dp))
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1261,6 +1272,123 @@ private fun GroupHeader(songs: List<Song>, title: String, isAlbum: Boolean, play
     }
 }
 
+/** Sezione Scarica: ricerca su Internet Archive, file di un titolo, link diretto e stato dei download. */
+@Composable
+private fun DownloadScreen() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var q by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<IaItem>?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var item by remember { mutableStateOf<IaItem?>(null) }
+    var files by remember { mutableStateOf<List<IaFile>?>(null) }
+    var link by remember { mutableStateOf("") }
+    fun fail(e: Throwable) = Toast.makeText(ctx, "Errore di rete: ${e.message}", Toast.LENGTH_LONG).show()
+    fun search() {
+        if (q.isBlank()) return
+        scope.launch { busy = true; results = withContext(Dispatchers.IO) { runCatching { iaSearch(q) }.getOrElse { fail(it); emptyList() } }; busy = false }
+    }
+    fun open(i: IaItem) {
+        item = i; files = null
+        scope.launch { files = withContext(Dispatchers.IO) { runCatching { iaFiles(i.id) }.getOrElse { fail(it); emptyList() } } }
+    }
+    // Cartella: Music/<titolo>; uno zip finisce in una sottocartella col suo nome (un titolo può contenere più mixtape).
+    fun jobs(i: IaItem, fs: List<IaFile>) = fs.map { f ->
+        Job(iaUrl(i.id, f.name), if (f.isZip) "${cleanName(i.title)}/${cleanName(f.name.substringAfterLast('/').removeSuffix(".zip"))}" else cleanName(i.title), f.name.substringAfterLast('/'), f.size)
+    }
+    fun start(js: List<Job>) { Downloads.enqueue(ctx, js); Toast.makeText(ctx, if (js.size == 1) "Download avviato" else "${js.size} download in coda", Toast.LENGTH_SHORT).show() }
+
+    val cur = item
+    if (cur != null) {
+        BackHandler { item = null }
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton({ item = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro") }
+                Column(Modifier.weight(1f)) {
+                    Text(cur.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(listOf(cur.creator, cur.year).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Box(Modifier.padding(horizontal = 16.dp)) { DownloadStatus() }
+            val fs = files
+            when {
+                fs == null -> Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                fs.isEmpty() -> Center("Nessun file audio in questo titolo")
+                else -> {
+                    val all = fs.filter { !it.isZip }.ifEmpty { fs.filter { it.isZip } } // se ci sono i singoli brani, gli zip sono doppioni
+                    Button({ start(jobs(cur, all)) }, Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Icon(IcDownload, null); Spacer(Modifier.width(8.dp)); Text("Scarica tutto · ${fmtSize(all.sumOf { it.size })}")
+                    }
+                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                        items(fs) { f ->
+                            ListItem(
+                                headlineContent = { Text(f.name.substringAfterLast('/'), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                supportingContent = { Text((if (f.isZip) "zip · " else "") + fmtSize(f.size)) },
+                                trailingContent = { IconButton({ start(jobs(cur, listOf(f))) }) { Icon(IcDownload, "Scarica") } },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+    Column(Modifier.fillMaxSize()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Cerca su Internet Archive (archive.org): mixtape e album in free download caricati dagli utenti. I file finiscono nella cartella Musica del telefono e compaiono nella libreria da soli.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                q, { q = it; if (it.isBlank()) results = null }, Modifier.fillMaxWidth(), label = { Text("Artista o titolo") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { search() }),
+                trailingIcon = { IconButton(::search) { Icon(Icons.Default.Search, "Cerca") } },
+            )
+            DownloadStatus()
+        }
+        val r = results
+        when {
+            busy -> Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            r == null -> Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Section("Da link diretto")
+                OutlinedTextField(link, { link = it }, Modifier.fillMaxWidth(), label = { Text("https://…/file.mp3 oppure .zip") }, singleLine = true)
+                OutlinedButton({
+                    val name = Uri.parse(link.trim()).lastPathSegment.orEmpty()
+                    if (!isAudioName(name) && !name.endsWith(".zip", ignoreCase = true)) Toast.makeText(ctx, "Il link deve puntare a un file audio o a uno zip", Toast.LENGTH_LONG).show()
+                    else start(listOf(Job(link.trim(), if (name.endsWith(".zip", true)) "Scaricati/${cleanName(name.removeSuffix(".zip"))}" else "Scaricati", name, 0)))
+                }, enabled = link.isNotBlank()) { Icon(IcDownload, null); Spacer(Modifier.width(8.dp)); Text("Scarica dal link") }
+            }
+            r.isEmpty() -> Center("Nessun risultato")
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                items(r) { i ->
+                    ListItem(
+                        headlineContent = { Text(i.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = { Text(listOf(i.creator, i.year).filter { it.isNotBlank() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingContent = { Icon(IcAlbum, null, tint = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.clickable { open(i) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Download in corso (barra + Annulla) e ultimi esiti. */
+@Composable
+private fun DownloadStatus() {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Downloads.current?.let { cur ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                val rest = Downloads.queue.size
+                Text("Scarico: ${cur.name}" + if (rest > 0) " · $rest in coda" else "", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                TextButton(Downloads::cancel) { Text("Annulla") }
+            }
+            LinearProgressIndicator(progress = { Downloads.progress }, Modifier.fillMaxWidth())
+        }
+        Downloads.log.take(3).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+    }
+}
+
 @Composable
 private fun NoPermission(ask: () -> Unit) {
     Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
@@ -1365,4 +1493,5 @@ private val IcSpeed = vec("M20.38 8.57l-1.23 1.85a8 8 0 0 1-.22 7.58H5.07A8 8 0 
 private val IcEqualizer = vec("M10 20h4V4h-4v16zm-6 0h4v-8H4v8zM16 9v11h4V9h-4z")
 private val IcVisualizer = vec("M7 18h2V6H7v12zm4 4h2V2h-2v20zm-8-8h2v-4H3v4zm12 4h2V6h-2v12zm4-8v4h2v-4h-2z")
 private val IcDragHandle = vec("M20 9H4v2h16V9zM4 15h16v-2H4v2z")
+private val IcDownload = vec("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
 private val TAB_ICONS = listOf(IcMusicNote, IcAlbum, Icons.Default.Person, IcLibrary, Icons.Default.Settings)
