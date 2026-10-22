@@ -131,8 +131,10 @@ class Player(private val ctx: Context, private val prefs: Prefs) {
         start(song)
     }
 
-    fun enqueue(song: Song) { upNext = upNext + song; plan() }
-    fun playNext(song: Song) { upNext = listOf(song) + upNext; plan() }
+    fun enqueue(song: Song) = enqueue(listOf(song))
+    fun playNext(song: Song) = playNext(listOf(song))
+    fun enqueue(songs: List<Song>) { upNext = upNext + songs; plan() }
+    fun playNext(songs: List<Song>) { upNext = songs + upNext; plan() }
     fun removeUpNext(i: Int) { upNext = upNext.filterIndexed { j, _ -> j != i }; plan() }
     fun moveUpNext(from: Int, to: Int) { val l = upNext.toMutableList(); l.add(to, l.removeAt(from)); upNext = l; plan() }
     fun clearUpNext() { upNext = emptyList(); plan() }

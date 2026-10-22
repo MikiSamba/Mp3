@@ -19,7 +19,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toInt() ?: 7  // su Actions cresce da solo a ogni build
-        versionName = "1.9"
+        versionName = "1.10"
     }
     signingConfigs {
         create("release") {

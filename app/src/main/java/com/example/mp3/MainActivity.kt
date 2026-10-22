@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 
 package com.example.mp3
 
@@ -40,10 +40,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -96,6 +98,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -280,13 +283,14 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
     val byId = remember(songs) { songs.associateBy { it.id } }
     LaunchedEffect(songs) { player.refresh(songs) }
 
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableIntStateOf(prefs.startTab) }
     var group by remember { mutableStateOf<String?>(null) }   // album, artista, FAV, RECENT o PL+nome aperto
+    var selected by remember(tab, group) { mutableStateOf(emptySet<Long>()) } // brani selezionati con pressione lunga; si azzera cambiando lista
     var query by remember { mutableStateOf<String?>(null) }   // null = ricerca chiusa
     var editing by remember { mutableStateOf<Song?>(null) }
     var info by remember { mutableStateOf<Song?>(null) }
-    var deleting by remember { mutableStateOf<Song?>(null) }   // in attesa di conferma (sistema o nostra)
-    var toPlaylist by remember { mutableStateOf<Song?>(null) }
+    var deleting by remember { mutableStateOf<List<Song>?>(null) }   // in attesa di conferma (sistema o nostra)
+    var toPlaylist by remember { mutableStateOf<List<Song>?>(null) }
     var nowPlaying by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -354,26 +358,32 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
     }
     LaunchedEffect(nowPlayingRequest) { if (nowPlayingRequest > 0) nowPlaying = true }
     LaunchedEffect(player.current == null) { if (player.current == null) nowPlaying = false }
-    BackHandler(!nowPlaying && (group != null || query != null)) { group = null; query = null }
+    BackHandler(!nowPlaying && (selected.isNotEmpty() || group != null || query != null)) {
+        if (selected.isNotEmpty()) selected = emptySet() else { group = null; query = null }
+    }
 
-    fun deleted(s: Song) { player.remove(s.id); raw = raw.filter { it.id != s.id } }
+    fun deleted(l: List<Song>) { val ids = l.map { it.id }.toSet(); ids.forEach(player::remove); raw = raw.filter { it.id !in ids } }
     val systemDelete = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { r ->
         deleting?.let { if (r.resultCode == Activity.RESULT_OK) deleted(it) }
         deleting = null
     }
     // ponytail: su Android 11+ conferma di sistema; su 10 RecoverableSecurityException; sotto serve WRITE_EXTERNAL_STORAGE, non richiesto.
-    fun requestDelete(s: Song) {
-        deleting = s
+    fun requestDelete(l: List<Song>) {
+        deleting = l
         if (Build.VERSION.SDK_INT >= 30) {
-            systemDelete.launch(IntentSenderRequest.Builder(MediaStore.createDeleteRequest(ctx.contentResolver, listOf(s.uri)).intentSender).build())
+            systemDelete.launch(IntentSenderRequest.Builder(MediaStore.createDeleteRequest(ctx.contentResolver, l.map { it.uri }).intentSender).build())
         }
     }
-    fun confirmedDelete(s: Song) {
-        try { ctx.contentResolver.delete(s.uri, null, null); deleted(s); deleting = null }
-        catch (e: SecurityException) {
-            if (Build.VERSION.SDK_INT >= 29 && e is RecoverableSecurityException) systemDelete.launch(IntentSenderRequest.Builder(e.userAction.actionIntent.intentSender).build())
+    fun confirmedDelete(l: List<Song>) {
+        val done = mutableListOf<Song>()
+        for (s in l) try { ctx.contentResolver.delete(s.uri, null, null); done += s } catch (e: SecurityException) {
+            deleted(done)
+            // ponytail: Android 10 chiede conferma per un file alla volta; i brani dopo il primo protetto vanno riselezionati.
+            if (Build.VERSION.SDK_INT >= 29 && e is RecoverableSecurityException) { deleting = listOf(s); systemDelete.launch(IntentSenderRequest.Builder(e.userAction.actionIntent.intentSender).build()) }
             else { Toast.makeText(ctx, "Impossibile eliminare su questa versione di Android", Toast.LENGTH_SHORT).show(); deleting = null }
+            return
         }
+        deleted(done); deleting = null
     }
 
     val q = query.orEmpty().trim()
@@ -398,20 +408,50 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
         else -> shown.filter { it.artist == g }
     }
     val inPlaylist = g?.takeIf { it.startsWith(PL) }?.removePrefix(PL)
+    val listSongs = if (g != null) groupSongs else shown
+    val sel = listSongs.filter { it.id in selected }   // selezione nell'ordine della lista
     val current = player.current
 
     Box {
         Scaffold(
             topBar = {
+                val selecting = selected.isNotEmpty()
                 TopAppBar(
                     title = {
                         val qq = query
-                        if (qq != null) TextField(qq, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Cerca…") }, singleLine = true)
-                        else Text(groupTitle ?: if (tab == 0) "Musica" else TABS[tab], fontWeight = FontWeight.Bold)
+                        when {
+                            selecting -> Text(if (sel.size == 1) "1 selezionato" else "${sel.size} selezionati", fontWeight = FontWeight.Bold)
+                            qq != null -> TextField(qq, { query = it }, Modifier.fillMaxWidth(), placeholder = { Text("Cerca…") }, singleLine = true)
+                            else -> Text(groupTitle ?: if (tab == 0) "Musica" else TABS[tab], fontWeight = FontWeight.Bold)
+                        }
                     },
-                    navigationIcon = { if (group != null) IconButton({ group = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro") } },
+                    navigationIcon = {
+                        when {
+                            selecting -> IconButton({ selected = emptySet() }) { Icon(Icons.Default.Close, "Annulla selezione") }
+                            group != null -> IconButton({ group = null }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro") }
+                        }
+                    },
                     actions = {
-                        if (tab < 4 && !(tab == 3 && group == null) && group != DL) IconButton({ query = if (query == null) "" else null }) {
+                        if (selecting) {
+                            // Azioni sui brani selezionati: le stesse del menu del singolo brano, tranne quelle che hanno senso solo per uno.
+                            IconButton({ selected = listSongs.map { it.id }.toSet() }) { Icon(IcSelectAll, "Seleziona tutto") }
+                            IconButton({ sel.firstOrNull()?.let { player.play(sel, it, "Selezione") }; selected = emptySet() }) { Icon(Icons.Default.PlayArrow, "Riproduci") }
+                            var menu by remember { mutableStateOf(false) }
+                            Box {
+                                IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
+                                DropdownMenu(menu, { menu = false }) {
+                                    @Composable fun item(label: String, icon: ImageVector, act: () -> Unit) = DropdownMenuItem({ Text(label) }, { menu = false; act(); selected = emptySet() }, leadingIcon = { Icon(icon, null) })
+                                    item("Riproduci dopo", IcPlaylistPlay) { player.playNext(sel); Toast.makeText(ctx, "Suonano dopo questo brano", Toast.LENGTH_SHORT).show() }
+                                    item("Aggiungi alla coda", IcPlaylistAdd) { player.enqueue(sel); Toast.makeText(ctx, "Aggiunti alla coda", Toast.LENGTH_SHORT).show() }
+                                    val allFav = sel.all { it.id in prefs.favorites }
+                                    item(if (allFav) "Rimuovi dai preferiti" else "Aggiungi ai preferiti", if (allFav) Icons.Default.Favorite else Icons.Default.FavoriteBorder) { prefs.setFavorites(sel.map { it.id }, !allFav) }
+                                    item("Aggiungi a playlist", IcLibrary) { toPlaylist = sel }
+                                    if (inPlaylist != null) item("Rimuovi dalla playlist", Icons.Default.Close) { prefs.setPlaylist(inPlaylist, prefs.playlists[inPlaylist].orEmpty() - sel.map { it.id }.toSet()) }
+                                    item("Condividi", Icons.Default.Share) { share(ctx, sel) }
+                                    item("Elimina dal dispositivo", Icons.Default.Delete) { requestDelete(sel) }
+                                }
+                            }
+                        } else if (tab < 4 && !(tab == 3 && group == null) && group != DL) IconButton({ query = if (query == null) "" else null }) {
                             Icon(if (query == null) Icons.Default.Search else Icons.Default.Close, "Cerca")
                         }
                     },
@@ -431,7 +471,8 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
             Box(Modifier.padding(pad)) {
                 val list: @Composable (List<Song>, String, (@Composable () -> Unit)?) -> Unit = { l, name, header ->
                     SongList(
-                        l, name, player, prefs, onEdit = { editing = it }, onDelete = ::requestDelete, onAddToPlaylist = { toPlaylist = it }, onInfo = { info = it },
+                        l, name, player, prefs, selected, onToggle = { s -> selected = if (s.id in selected) selected - s.id else selected + s.id },
+                        onEdit = { editing = it }, onDelete = { requestDelete(listOf(it)) }, onAddToPlaylist = { toPlaylist = listOf(it) }, onInfo = { info = it },
                         onRemoveFromPlaylist = inPlaylist?.let { pl -> { s: Song -> prefs.setPlaylist(pl, prefs.playlists[pl].orEmpty() - s.id) } },
                         fastScroll = name == "Brani" && prefs.sort == "title", header = header,
                     )
@@ -481,13 +522,13 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
             },
         )
     }
-    toPlaylist?.let { s -> AddToPlaylistDialog(s, prefs) { toPlaylist = null } }
-    deleting?.takeIf { Build.VERSION.SDK_INT < 30 }?.let { s ->
+    toPlaylist?.let { l -> AddToPlaylistDialog(l, prefs) { toPlaylist = null } }
+    deleting?.takeIf { Build.VERSION.SDK_INT < 30 }?.let { l ->
         AlertDialog(
             onDismissRequest = { deleting = null },
-            title = { Text("Eliminare il brano?") },
-            text = { Text("\"${s.title}\" verrà cancellato dal dispositivo.") },
-            confirmButton = { TextButton({ confirmedDelete(s) }) { Text("Elimina") } },
+            title = { Text(if (l.size == 1) "Eliminare il brano?" else "Eliminare ${l.size} brani?") },
+            text = { Text(if (l.size == 1) "\"${l[0].title}\" verrà cancellato dal dispositivo." else "I brani selezionati verranno cancellati dal dispositivo.") },
+            confirmButton = { TextButton({ confirmedDelete(l) }) { Text("Elimina") } },
             dismissButton = { TextButton({ deleting = null }) { Text("Annulla") } },
         )
     }
@@ -495,12 +536,14 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
 
 @Composable
 private fun SongList(
-    songs: List<Song>, name: String, player: Player, prefs: Prefs,
+    songs: List<Song>, name: String, player: Player, prefs: Prefs, selected: Set<Long>, onToggle: (Song) -> Unit,
     onEdit: (Song) -> Unit, onDelete: (Song) -> Unit, onAddToPlaylist: (Song) -> Unit, onInfo: (Song) -> Unit, onRemoveFromPlaylist: ((Song) -> Unit)? = null,
     fastScroll: Boolean = false, header: (@Composable () -> Unit)? = null,
 ) {
     if (songs.isEmpty()) return Center("Nessun brano")
     val ctx = LocalContext.current
+    val haptic = rememberHaptic(prefs)
+    val selecting = selected.isNotEmpty()   // pressione lunga su un brano: la lista passa in selezione multipla, il tocco aggiunge o toglie
     val state = rememberLazyListState()
     val scroller = fastScroll && songs.size >= 15
     Box(Modifier.fillMaxSize()) {
@@ -509,6 +552,7 @@ private fun SongList(
         itemsIndexed(songs, key = { i, s -> "${s.id}-$i" }) { _, s ->
             val isCurrent = s.id == player.current?.id
             val fav = s.id in prefs.favorites
+            val picked = s.id in selected
             ListItem(
                 headlineContent = {
                     Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = if (isCurrent) FontWeight.Bold else null,
@@ -520,6 +564,8 @@ private fun SongList(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (fav) Icon(Icons.Default.Favorite, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
                         if (prefs.showDuration) Text(fmt(s.duration), Modifier.padding(start = 6.dp), style = MaterialTheme.typography.bodySmall)
+                        if (selecting) Checkbox(picked, { onToggle(s) })
+                        else {
                         var menu by remember { mutableStateOf(false) }
                         Box {
                             IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Altro") }
@@ -531,16 +577,21 @@ private fun SongList(
                                 item("Aggiungi a playlist", IcLibrary) { onAddToPlaylist(s) }
                                 if (onRemoveFromPlaylist != null) item("Rimuovi dalla playlist", Icons.Default.Close) { onRemoveFromPlaylist(s) }
                                 item("Modifica", Icons.Default.Edit) { onEdit(s) }
-                                item("Condividi", Icons.Default.Share) { share(ctx, s) }
+                                item("Condividi", Icons.Default.Share) { share(ctx, listOf(s)) }
                                 item("Imposta come suoneria", Icons.Default.Phone) { setRingtone(ctx, s) }
                                 item("Info file", Icons.Default.Info) { onInfo(s) }
                                 item("Elimina dal dispositivo", Icons.Default.Delete) { onDelete(s) }
                             }
                         }
+                        }
                     }
                 },
-                colors = ListItemDefaults.colors(containerColor = if (isCurrent) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent),
-                modifier = Modifier.clickable { player.play(songs, s, name) },
+                colors = ListItemDefaults.colors(containerColor = when {
+                    picked -> MaterialTheme.colorScheme.primaryContainer
+                    isCurrent -> MaterialTheme.colorScheme.secondaryContainer
+                    else -> Color.Transparent
+                }),
+                modifier = Modifier.combinedClickable(onClick = { if (selecting) onToggle(s) else player.play(songs, s, name) }, onLongClick = { haptic(); onToggle(s) }),
             )
         }
     }
@@ -686,13 +737,14 @@ private fun LibraryScreen(prefs: Prefs, songs: List<Song>, onOpen: (String) -> U
 }
 
 @Composable
-private fun AddToPlaylistDialog(song: Song, prefs: Prefs, onDismiss: () -> Unit) {
+private fun AddToPlaylistDialog(songs: List<Song>, prefs: Prefs, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     var newName by remember { mutableStateOf("") }
     fun add(name: String) {
         val ids = prefs.playlists[name].orEmpty()
-        if (song.id in ids) Toast.makeText(ctx, "Già presente in \"$name\"", Toast.LENGTH_SHORT).show()
-        else { prefs.setPlaylist(name, ids + song.id); Toast.makeText(ctx, "Aggiunto a \"$name\"", Toast.LENGTH_SHORT).show() }
+        val new = songs.map { it.id }.filter { it !in ids }   // i brani già presenti non vengono duplicati
+        if (new.isEmpty()) Toast.makeText(ctx, if (songs.size == 1) "Già presente in \"$name\"" else "Già tutti presenti in \"$name\"", Toast.LENGTH_SHORT).show()
+        else { prefs.setPlaylist(name, ids + new); Toast.makeText(ctx, if (new.size == 1) "Aggiunto a \"$name\"" else "${new.size} brani aggiunti a \"$name\"", Toast.LENGTH_SHORT).show() }
         onDismiss()
     }
     AlertDialog(
@@ -1119,6 +1171,7 @@ private fun SettingsScreen(prefs: Prefs, onReload: () -> Unit) {
         }
         Toggle("Vibrazione sui tasti", prefs.haptics) { prefs.haptics = it }
         Section("Libreria")
+        Choice("Pagina iniziale", TABS.take(4).mapIndexed { i, n -> i.toString() to n }, prefs.startTab.toString()) { prefs.startTab = it.toInt() }
         Choice("Ordina brani per", listOf("title" to "Titolo", "artist" to "Artista", "album" to "Album", "date" to "Più recenti"), prefs.sort) { prefs.sort = it }
         Toggle("Mostra durata", prefs.showDuration) { prefs.showDuration = it }
         OutlinedButton(onReload) { Icon(Icons.Default.Refresh, null); Spacer(Modifier.width(8.dp)); Text("Ricarica libreria") }
@@ -1446,10 +1499,11 @@ private fun localBuild(ctx: Context): Int = ctx.packageManager.getPackageInfo(ct
 private fun localVersion(ctx: Context): String = ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
 private fun brani(n: Int) = if (n == 1) "1 brano" else "$n brani"
 
-private fun share(ctx: Context, s: Song) = ctx.startActivity(Intent.createChooser(
-    Intent(Intent.ACTION_SEND).setType(ctx.contentResolver.getType(s.uri) ?: "audio/*").putExtra(Intent.EXTRA_STREAM, s.uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
-    "Condividi brano",
-))
+private fun share(ctx: Context, l: List<Song>) {
+    val i = if (l.size == 1) Intent(Intent.ACTION_SEND).setType(ctx.contentResolver.getType(l[0].uri) ?: "audio/*").putExtra(Intent.EXTRA_STREAM, l[0].uri)
+            else Intent(Intent.ACTION_SEND_MULTIPLE).setType("audio/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(l.map { it.uri }))
+    ctx.startActivity(Intent.createChooser(i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), if (l.size == 1) "Condividi brano" else "Condividi ${l.size} brani"))
+}
 
 /** Serve il permesso "Modifica impostazioni di sistema": la prima volta apre la schermata di sistema per concederlo. */
 private fun setRingtone(ctx: Context, s: Song) {
@@ -1493,5 +1547,6 @@ private val IcSpeed = vec("M20.38 8.57l-1.23 1.85a8 8 0 0 1-.22 7.58H5.07A8 8 0 
 private val IcEqualizer = vec("M10 20h4V4h-4v16zm-6 0h4v-8H4v8zM16 9v11h4V9h-4z")
 private val IcVisualizer = vec("M7 18h2V6H7v12zm4 4h2V2h-2v20zm-8-8h2v-4H3v4zm12 4h2V6h-2v12zm4-8v4h2v-4h-2z")
 private val IcDragHandle = vec("M20 9H4v2h16V9zM4 15h16v-2H4v2z")
+private val IcSelectAll = vec("M3 5h2V3c-1.1 0-2 .9-2 2zm0 8h2v-2H3v2zm4 8h2v-2H7v2zM3 9h2V7H3v2zm10-6h-2v2h2V3zm6 0v2h2c0-1.1-.9-2-2-2zM5 21v-2H3c0 1.1.9 2 2 2zm-2-4h2v-2H3v2zM9 3H7v2h2V3zm2 18h2v-2h-2v2zm8-8h2v-2h-2v2zm0 8c1.1 0 2-.9 2-2h-2v2zm0-12h2V7h-2v2zm0 8h2v-2h-2v2zm-4 4h2v-2h-2v2zm0-16h2V3h-2v2zM7 17h10V7H7v10zm2-8h6v6H9V9z")
 private val IcDownload = vec("M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z")
 private val TAB_ICONS = listOf(IcMusicNote, IcAlbum, Icons.Default.Person, IcLibrary, Icons.Default.Settings)

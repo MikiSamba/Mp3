@@ -139,12 +139,14 @@ class Prefs private constructor(ctx: Context) {
     var crossfade by pref("crossfade", 0)      // secondi, 0 = spenta
     var visualizer by pref("visualizer", false)
     var skipBuild by pref("skipBuild", 0)      // build GitHub di cui l'utente ha rifiutato l'avviso
+    var startTab by pref("startTab", 0)        // scheda aperta all'avvio: 0 Brani, 1 Album, 2 Artisti, 3 Raccolta
 
     var editsVersion by mutableIntStateOf(0); private set
 
     var favorites: Set<Long> by mutableStateOf(sp.getStringSet("favorites", null).orEmpty().map { it.toLong() }.toSet()); private set
-    fun toggleFavorite(id: Long) {
-        favorites = if (id in favorites) favorites - id else favorites + id
+    fun toggleFavorite(id: Long) = setFavorites(listOf(id), id !in favorites)
+    fun setFavorites(ids: Collection<Long>, on: Boolean) {
+        favorites = if (on) favorites + ids else favorites - ids.toSet()
         sp.edit().putStringSet("favorites", favorites.map(Long::toString).toSet()).apply()
     }
 
