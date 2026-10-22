@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 
 package com.example.mp3
 
@@ -55,6 +55,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -120,12 +122,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -144,6 +148,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
@@ -154,6 +159,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathParser
 import androidx.compose.ui.input.pointer.pointerInput
@@ -178,7 +184,13 @@ import java.io.File
 private val ACCENTS = linkedMapOf(
     "Arancio" to Color(0xFFFB8C00), "Rosso" to Color(0xFFE53935), "Blu" to Color(0xFF1E88E5),
     "Verde" to Color(0xFF43A047), "Viola" to Color(0xFF8E24AA), "Rosa" to Color(0xFFD81B60),
+    "Giallo" to Color(0xFFFDD835), "Ciano" to Color(0xFF00ACC1), "Lime" to Color(0xFFC0CA33), "Indaco" to Color(0xFF3949AB),
+    "Turchese" to Color(0xFF26A69A), "Corallo" to Color(0xFFFF7043), "Oro" to Color(0xFFC9A227), "Magenta" to Color(0xFFD500F9),
+    "Menta" to Color(0xFF00E676), "Lavanda" to Color(0xFF9575CD), "Ambra" to Color(0xFFFFB300), "Ghiaccio" to Color(0xFF4FC3F7),
+    "Caffè" to Color(0xFF8D6E63), "Grigio" to Color(0xFF757575),
 )
+/** Testo sopra un colore pieno: nero sui chiari, bianco sugli scuri. */
+private fun onColor(c: Color) = if (c.luminance() > 0.5f) Color.Black else Color.White
 private val TABS = listOf("Brani", "Album", "Artisti", "Raccolta", "Opzioni")
 private const val FAV = "fav"
 private const val RECENT = "recent"
@@ -207,7 +219,7 @@ class MainActivity : ComponentActivity() {
         handle(intent)
         val prefs = Prefs.of(this)
         setContent {
-            Themed(prefs) { Surface(Modifier.fillMaxSize()) { player?.let { App(prefs, it, nowPlayingRequest, shortcut) } } }
+            Themed(prefs) { Surface(Modifier.fillMaxSize(), color = Color.Transparent, contentColor = MaterialTheme.colorScheme.onSurface) { player?.let { App(prefs, it, nowPlayingRequest, shortcut) } } }
         }
     }
 
@@ -230,7 +242,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun Themed(prefs: Prefs, content: @Composable () -> Unit) {
-    val dark = when (prefs.theme) { "light" -> false; "dark", "amoled" -> true; else -> isSystemInDarkTheme() }
+    val retro = RETRO[prefs.theme]
+    val dark = retro?.dark ?: when (prefs.theme) { "light" -> false; "dark", "amoled" -> true; else -> isSystemInDarkTheme() }
     val ctx = LocalContext.current
     // Icone delle barre di sistema coerenti col tema scelto nell'app, non solo con quello di sistema.
     LaunchedEffect(dark) {
@@ -240,16 +253,25 @@ private fun Themed(prefs: Prefs, content: @Composable () -> Unit) {
     }
     val accent = ACCENTS[prefs.accent] ?: ACCENTS.values.first()
     val scheme = when {
+        retro != null -> retro.scheme
         prefs.dynamic && Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-        dark -> darkColorScheme(primary = accent, onPrimary = Color.White, secondary = accent, primaryContainer = accent.copy(alpha = 0.3f), secondaryContainer = accent.copy(alpha = 0.2f))
-        else -> lightColorScheme(primary = accent, secondary = accent, primaryContainer = accent.copy(alpha = 0.15f), secondaryContainer = accent.copy(alpha = 0.12f))
+        dark -> darkColorScheme(primary = accent, onPrimary = onColor(accent), secondary = accent, primaryContainer = accent.copy(alpha = 0.3f), secondaryContainer = accent.copy(alpha = 0.2f))
+        else -> lightColorScheme(primary = accent, onPrimary = onColor(accent), secondary = accent, primaryContainer = accent.copy(alpha = 0.15f), secondaryContainer = accent.copy(alpha = 0.12f))
     }
     // Tema "Nero": superfici nere pure, che sugli schermi OLED restano spente.
     val black = if (prefs.theme == "amoled") scheme.copy(
         background = Color.Black, surface = Color.Black, surfaceContainerLowest = Color.Black, surfaceContainerLow = Color.Black,
         surfaceContainer = Color(0xFF0E0E0E), surfaceContainerHigh = Color(0xFF181818), surfaceContainerHighest = Color(0xFF222222), surfaceVariant = Color(0xFF222222),
     ) else scheme
-    MaterialTheme(colorScheme = black, content = content)
+    MaterialTheme(colorScheme = black, typography = retro?.let(::retroTypography) ?: Typography(), shapes = retro?.shapes ?: Shapes()) {
+        // Lo sfondo è un fratello del contenuto, non un genitore: i temi retrò lo disegnano (gradiente, griglia, pois), gli altri è tinta unita.
+        val plain = black.surface
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().drawBehind { if (retro != null) retro.backdrop(this) else drawRect(plain) })
+            content()
+            if (retro?.scanlines == true) Scanlines()
+        }
+    }
 }
 
 @Composable
@@ -414,8 +436,10 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
 
     Box {
         Scaffold(
+            containerColor = Color.Transparent,
             topBar = {
                 val selecting = selected.isNotEmpty()
+                Column {
                 TopAppBar(
                     title = {
                         val qq = query
@@ -456,6 +480,8 @@ private fun App(prefs: Prefs, player: Player, nowPlayingRequest: Int, shortcut: 
                         }
                     },
                 )
+                RETRO[prefs.theme]?.stripe?.forEach { Box(Modifier.fillMaxWidth().height(3.dp).background(it)) }
+                }
             },
             bottomBar = {
                 Column {
@@ -838,7 +864,7 @@ private fun NowPlaying(song: Song, player: Player, prefs: Prefs, onClose: () -> 
             containerColor = Color.Transparent,
             topBar = {
                 TopAppBar(
-                    title = { Text("In riproduzione") },
+                    title = { Text("In riproduzione", style = MaterialTheme.typography.titleMedium, maxLines = 1) }, // quattro icone a destra: coi caratteri larghi dei temi retrò il titolo grande andrebbe a capo
                     navigationIcon = { IconButton(onClose) { Icon(Icons.Default.KeyboardArrowDown, "Chiudi") } },
                     actions = {
                         IconToggle(if (fav) Icons.Default.Favorite else Icons.Default.FavoriteBorder, fav, "Preferito") { prefs.toggleFavorite(song.id) }
@@ -1153,11 +1179,13 @@ private fun SettingsScreen(prefs: Prefs, onReload: () -> Unit) {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Section("Aspetto")
-        Choice("Tema", listOf("system" to "Sistema", "light" to "Chiaro", "dark" to "Scuro", "amoled" to "Nero"), prefs.theme) { prefs.theme = it }
-        if (Build.VERSION.SDK_INT >= 31) Toggle("Colori dinamici (Material You)", prefs.dynamic) { prefs.dynamic = it }
-        if (!prefs.dynamic || Build.VERSION.SDK_INT < 31) {
+        Choice("Tema", listOf("system" to "Sistema", "light" to "Chiaro", "dark" to "Scuro", "amoled" to "Nero") + RETRO.map { (k, t) -> k to t.label }, prefs.theme) { prefs.theme = it }
+        val retro = prefs.theme in RETRO
+        if (retro) Text("I temi anni '80 hanno colori e caratteri propri: il colore accento non si applica.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!retro && Build.VERSION.SDK_INT >= 31) Toggle("Colori dinamici (Material You)", prefs.dynamic) { prefs.dynamic = it }
+        if (!retro && (!prefs.dynamic || Build.VERSION.SDK_INT < 31)) {
             Text("Colore accento", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 ACCENTS.forEach { (name, color) ->
                     val selected = prefs.accent == name
                     Box(
@@ -1165,7 +1193,7 @@ private fun SettingsScreen(prefs: Prefs, onReload: () -> Unit) {
                             .border(if (selected) 3.dp else 0.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
                             .clickable { prefs.accent = name },
                         contentAlignment = Alignment.Center,
-                    ) { if (selected) Icon(Icons.Default.Check, name, tint = Color.White) }
+                    ) { if (selected) Icon(Icons.Default.Check, name, tint = onColor(color)) }
                 }
             }
         }
